@@ -1,0 +1,142 @@
+[
+ {
+  "id": "kpi_counters",
+  "page": "overview",
+  "label": "KPI counters (13-month scan)",
+  "quick": true,
+  "sql": "SELECT * FROM (WITH base AS (\n  SELECT `Usage Date` AS d,\n         MEASURE(`List Cost`) AS cost,\n         MEASURE(`DBUs`) AS dbus,\n         MEASURE(`Serverless Cost`) AS scost,\n         MEASURE(`Untagged Cost`) AS ucost\n  FROM {{METRIC_VIEW}}\n  GROUP BY 1\n)\nSELECT\n  SUM(CASE WHEN d >= CURRENT_DATE - INTERVAL 30 DAYS AND d < CURRENT_DATE THEN cost END) AS cost_l30d,\n  SUM(CASE WHEN d >= CURRENT_DATE - INTERVAL 60 DAYS AND d < CURRENT_DATE - INTERVAL 30 DAYS THEN cost END) AS cost_prior_30d,\n  SUM(CASE WHEN d >= DATE_TRUNC('MONTH', CURRENT_DATE) THEN cost END) AS cost_mtd,\n  SUM(CASE WHEN d >= CURRENT_DATE - INTERVAL 30 DAYS AND d < CURRENT_DATE THEN dbus END) AS dbus_l30d,\n  SUM(CASE WHEN d >= CURRENT_DATE - INTERVAL 30 DAYS AND d < CURRENT_DATE THEN scost END)\n    / NULLIF(SUM(CASE WHEN d >= CURRENT_DATE - INTERVAL 30 DAYS AND d < CURRENT_DATE THEN cost END), 0) AS serverless_share_l30d,\n  SUM(CASE WHEN d >= CURRENT_DATE - INTERVAL 30 DAYS AND d < CURRENT_DATE THEN ucost END)\n    / NULLIF(SUM(CASE WHEN d >= CURRENT_DATE - INTERVAL 30 DAYS AND d < CURRENT_DATE THEN cost END), 0) AS untagged_share_l30d\nFROM base\n) t"
+ },
+ {
+  "id": "daily_area_by_product",
+  "page": "overview",
+  "label": "Daily cost by product (90d)",
+  "quick": true,
+  "sql": "SELECT usage_date, product, SUM(list_cost) AS c FROM (SELECT `Usage Date` AS usage_date,\n       `Product` AS product,\n       `Compute Mode` AS compute_mode,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 90 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1, 2, 3\n) t GROUP BY 1, 2"
+ },
+ {
+  "id": "product_pie",
+  "page": "overview",
+  "label": "Product cost share (90d)",
+  "quick": false,
+  "sql": "SELECT product, SUM(list_cost) AS c FROM (SELECT `Usage Date` AS usage_date,\n       `Product` AS product,\n       `Compute Mode` AS compute_mode,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 90 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1, 2, 3\n) t GROUP BY 1"
+ },
+ {
+  "id": "top_workspaces_bar",
+  "page": "overview",
+  "label": "Top workspaces bar (30d)",
+  "quick": true,
+  "sql": "SELECT workspace, SUM(list_cost) AS c FROM (SELECT `Workspace` AS workspace,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus,\n       MEASURE(`Serverless Share`) AS serverless_share,\n       MEASURE(`Cost per DBU`) AS cost_per_dbu\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 30 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1\nORDER BY 2 DESC\nLIMIT 40\n) t GROUP BY 1"
+ },
+ {
+  "id": "top_skus_bar",
+  "page": "overview",
+  "label": "Top SKUs bar (30d)",
+  "quick": false,
+  "sql": "SELECT sku, compute_mode, SUM(list_cost) AS c FROM (SELECT `SKU` AS sku,\n       `Compute Mode` AS compute_mode,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus,\n       MEASURE(`Cost per DBU`) AS cost_per_dbu\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 30 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1, 2\nORDER BY 3 DESC\nLIMIT 30\n) t GROUP BY 1, 2"
+ },
+ {
+  "id": "cost_by_grain_week",
+  "page": "trends",
+  "label": "Cost trend, weekly grain",
+  "quick": true,
+  "sql": "SELECT period, product, SUM(list_cost) AS c FROM (SELECT DATE_TRUNC('WEEK', `Usage Date`) AS period,\n       `Product` AS product,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nGROUP BY 1, 2\n) t GROUP BY 1, 2"
+ },
+ {
+  "id": "dbu_line_week",
+  "page": "trends",
+  "label": "DBU trend, weekly grain",
+  "quick": false,
+  "sql": "SELECT period, SUM(dbus) AS d FROM (SELECT DATE_TRUNC('WEEK', `Usage Date`) AS period,\n       `Product` AS product,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nGROUP BY 1, 2\n) t GROUP BY 1"
+ },
+ {
+  "id": "tag_status_monthly",
+  "page": "trends",
+  "label": "Tagged vs untagged by month",
+  "quick": false,
+  "sql": "SELECT month, tag_status, SUM(list_cost) AS c FROM (SELECT `Usage Month` AS month,\n       `Tag Status` AS tag_status,\n       MEASURE(`List Cost`) AS list_cost\nFROM {{METRIC_VIEW}}\nGROUP BY 1, 2\n) t GROUP BY 1, 2"
+ },
+ {
+  "id": "mom_table",
+  "page": "trends",
+  "label": "MoM table (window functions)",
+  "quick": true,
+  "sql": "SELECT * FROM (WITH m AS (\n  SELECT `Usage Month` AS month,\n         `Product` AS product,\n         MEASURE(`List Cost`) AS list_cost,\n         MEASURE(`DBUs`) AS dbus\n  FROM {{METRIC_VIEW}}\n  GROUP BY 1, 2\n)\nSELECT m.*,\n       list_cost - LAG(list_cost) OVER (PARTITION BY product ORDER BY month) AS mom_change,\n       ROUND(100 * (list_cost - LAG(list_cost) OVER (PARTITION BY product ORDER BY month))\n         / NULLIF(LAG(list_cost) OVER (PARTITION BY product ORDER BY month), 0), 1) AS mom_pct\nFROM m\n) t"
+ },
+ {
+  "id": "workspaces_table",
+  "page": "breakdowns",
+  "label": "Workspaces detail table",
+  "quick": false,
+  "sql": "SELECT * FROM (SELECT `Workspace` AS workspace,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus,\n       MEASURE(`Serverless Share`) AS serverless_share,\n       MEASURE(`Cost per DBU`) AS cost_per_dbu\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 30 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1\nORDER BY 2 DESC\nLIMIT 40\n) t"
+ },
+ {
+  "id": "identities_table",
+  "page": "breakdowns",
+  "label": "Identities detail table",
+  "quick": false,
+  "sql": "SELECT * FROM (SELECT COALESCE(`Run As`, 'unknown') AS run_as,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 30 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1\nORDER BY 2 DESC\nLIMIT 25\n) t"
+ },
+ {
+  "id": "skus_table",
+  "page": "breakdowns",
+  "label": "SKU detail table",
+  "quick": false,
+  "sql": "SELECT * FROM (SELECT `SKU` AS sku,\n       `Compute Mode` AS compute_mode,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus,\n       MEASURE(`Cost per DBU`) AS cost_per_dbu\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 30 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1, 2\nORDER BY 3 DESC\nLIMIT 30\n) t"
+ },
+ {
+  "id": "daily_area_product_sql_apps",
+  "page": "filters",
+  "label": "Filter: product = SQL, APPS",
+  "quick": true,
+  "sql": "SELECT usage_date, product, SUM(list_cost) AS c FROM (SELECT `Usage Date` AS usage_date,\n       `Product` AS product,\n       `Compute Mode` AS compute_mode,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 90 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1, 2, 3\n) t WHERE product IN ('SQL', 'APPS') GROUP BY 1, 2"
+ },
+ {
+  "id": "daily_area_serverless_only",
+  "page": "filters",
+  "label": "Filter: serverless only",
+  "quick": false,
+  "sql": "SELECT usage_date, compute_mode, SUM(list_cost) AS c FROM (SELECT `Usage Date` AS usage_date,\n       `Product` AS product,\n       `Compute Mode` AS compute_mode,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 90 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1, 2, 3\n) t WHERE compute_mode = 'Serverless' GROUP BY 1, 2"
+ },
+ {
+  "id": "daily_area_last_14d",
+  "page": "filters",
+  "label": "Filter: last 14 days",
+  "quick": true,
+  "sql": "SELECT usage_date, product, SUM(list_cost) AS c FROM (SELECT `Usage Date` AS usage_date,\n       `Product` AS product,\n       `Compute Mode` AS compute_mode,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 90 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1, 2, 3\n) t WHERE usage_date >= CURRENT_DATE - INTERVAL 14 DAYS GROUP BY 1, 2"
+ },
+ {
+  "id": "grain_day",
+  "page": "filters",
+  "label": "Grain switch: daily",
+  "quick": false,
+  "sql": "SELECT period, product, SUM(list_cost) AS c FROM (SELECT DATE_TRUNC('DAY', `Usage Date`) AS period,\n       `Product` AS product,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nGROUP BY 1, 2\n) t GROUP BY 1, 2"
+ },
+ {
+  "id": "grain_month",
+  "page": "filters",
+  "label": "Grain switch: monthly",
+  "quick": true,
+  "sql": "SELECT period, product, SUM(list_cost) AS c FROM (SELECT DATE_TRUNC('MONTH', `Usage Date`) AS period,\n       `Product` AS product,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nGROUP BY 1, 2\n) t GROUP BY 1, 2"
+ },
+ {
+  "id": "grain_quarter_product_filter",
+  "page": "filters",
+  "label": "Grain: quarterly + product filter",
+  "quick": false,
+  "sql": "SELECT period, product, SUM(list_cost) AS c FROM (SELECT DATE_TRUNC('QUARTER', `Usage Date`) AS period,\n       `Product` AS product,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus\nFROM {{METRIC_VIEW}}\nGROUP BY 1, 2\n) t WHERE product IN ('JOBS', 'MODEL_SERVING') GROUP BY 1, 2"
+ },
+ {
+  "id": "workspaces_table_3_selected",
+  "page": "filters",
+  "label": "Filter: 3 workspaces selected",
+  "quick": false,
+  "sql": "SELECT * FROM (SELECT `Workspace` AS workspace,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus,\n       MEASURE(`Serverless Share`) AS serverless_share,\n       MEASURE(`Cost per DBU`) AS cost_per_dbu\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 30 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1\nORDER BY 2 DESC\nLIMIT 40\n) t WHERE workspace IN ({{FILTER_WORKSPACES_IN}})"
+ },
+ {
+  "id": "sku_table_classic_only",
+  "page": "filters",
+  "label": "Filter: classic compute only",
+  "quick": false,
+  "sql": "SELECT * FROM (SELECT `SKU` AS sku,\n       `Compute Mode` AS compute_mode,\n       MEASURE(`List Cost`) AS list_cost,\n       MEASURE(`DBUs`) AS dbus,\n       MEASURE(`Cost per DBU`) AS cost_per_dbu\nFROM {{METRIC_VIEW}}\nWHERE `Usage Date` >= CURRENT_DATE - INTERVAL 30 DAYS AND `Usage Date` < CURRENT_DATE\nGROUP BY 1, 2\nORDER BY 3 DESC\nLIMIT 30\n) t WHERE compute_mode = 'Classic'"
+ }
+]

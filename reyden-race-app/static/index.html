@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reyden Query Race</title>
+<link rel="stylesheet" href="/static/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+</head>
+<body>
+<div class="bg-grid"></div>
+
+<header class="hero">
+  <div class="badge">DATABRICKS APP · LIVE DEMO</div>
+  <h1>The <span class="rey">Reyden</span> Query Race</h1>
+  <p class="sub">
+    Two SQL warehouses. The exact same AI/BI cost dashboard queries, on the same
+    260M-row clustered billing data, cache-busted, raced head-to-head — live.
+  </p>
+  <p class="links" id="dash-links"></p>
+</header>
+
+<main>
+  <section class="card controls">
+    <div class="contenders">
+      <div class="contender reyden">
+        <div class="dot"></div>
+        <div><div class="name">Reyden</div><div class="meta" id="rey-meta">Small · serverless</div></div>
+      </div>
+      <div class="vs">VS</div>
+      <div class="contender starter">
+        <div class="dot"></div>
+        <div><div class="name">Serverless Starter</div><div class="meta" id="st-meta">X-Large Pro · serverless</div></div>
+      </div>
+    </div>
+    <div class="control-row">
+      <div class="seg" id="preset-seg" role="tablist" aria-label="Scenario preset"></div>
+      <div class="runs">
+        <span>runs</span>
+        <div class="stepper">
+          <button id="runs-dec" aria-label="fewer runs">−</button>
+          <b id="runs-val">1</b>
+          <button id="runs-inc" aria-label="more runs">+</button>
+        </div>
+      </div>
+      <button class="go" id="go">▶&nbsp; Start the race</button>
+    </div>
+    <div class="status-line" id="status-line">Pick a preset and hit start — warehouses warm up first, then every query fires on both engines simultaneously.</div>
+  </section>
+
+  <section class="kpis" id="kpis" hidden>
+    <div class="kpi hero-kpi"><div class="kpi-val" id="k-speedup">–</div><div class="kpi-label">geomean speedup</div></div>
+    <div class="kpi"><div class="kpi-val" id="k-wins">–</div><div class="kpi-label">Reyden wins</div></div>
+    <div class="kpi totals">
+      <div class="kpi-label">total engine time</div>
+      <div class="total-row"><span class="tag rey">REY</span><div class="total-bar"><i id="t-rey"></i></div><span class="tval" id="tv-rey">–</span></div>
+      <div class="total-row"><span class="tag st">STR</span><div class="total-bar"><i id="t-st"></i></div><span class="tval" id="tv-st">–</span></div>
+    </div>
+    <div class="kpi"><div class="kpi-val" id="k-progress">–</div><div class="kpi-label">queries finished</div></div>
+  </section>
+
+  <section class="banner" id="banner" hidden></section>
+
+  <section class="track" id="track"></section>
+
+  <footer class="method card">
+    <b>Methodology.</b> Scenario SQL is generated from the live Lakeview dashboard datasets
+    (a Unity Catalog metric view over liquid-clustered copies of
+    <code>system.billing</code> tables) and shaped exactly like widget queries — page defaults plus
+    filter/parameter variants. Every statement carries a unique tag to defeat result caches and runs
+    through the SQL Statement Execution API; bars show wall-clock time to results-ready, medians across runs.
+    Both lanes warm up before the start gun so cold starts never skew a lap.
+  </footer>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

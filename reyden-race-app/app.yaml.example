@@ -1,0 +1,23 @@
+# Copy to app.yaml and fill in your values. app.yaml is gitignored because it
+# carries environment-specific configuration (catalog paths, dashboard URLs).
+command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+env:
+  # Warehouse IDs are injected from app resources — create the app with two
+  # sql_warehouse resources named to match the valueFrom keys below.
+  - name: REYDEN_WAREHOUSE_ID
+    valueFrom: reyden-warehouse
+  - name: STARTER_WAREHOUSE_ID
+    valueFrom: starter-warehouse
+  # Fully-qualified UC metric view the race queries run against (required).
+  - name: METRIC_VIEW
+    value: "<catalog>.<schema>.<metric_view>"
+  # Optional: comma-separated workspace names for the workspace-filter
+  # scenario (scenario is hidden when unset).
+  - name: FILTER_WORKSPACES
+    value: ""
+  # Optional: deep links to the two dashboards, shown in the app header.
+  - name: REYDEN_DASHBOARD_URL
+    value: ""
+  - name: STARTER_DASHBOARD_URL
+    value: ""
