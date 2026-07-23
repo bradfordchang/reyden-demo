@@ -794,7 +794,8 @@ def race_state(race_id: str):
                                      for c in st["inflight"].values()]}
                  for lane, st in race["lanes"].items()}
         results = list(race["results"])
-    return {"id": race_id, "status": race["status"], "runs": race["runs"],
+    return {"id": race_id, "status": race["status"], "error": race["error"],
+            "runs": race["runs"],
             "scenario_ids": race["scenario_ids"], "dashboard": race["dashboard"],
             "warehouses": race["warehouses"], "lanes": lanes,
             "results": results, "summary": race["summary"]}

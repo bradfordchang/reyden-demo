@@ -14,6 +14,7 @@ const state = {
   reyden: [], reyId: null,
   runs: 1,
   race: null, poll: null, raf: null, lastSnap: null, lastSnapAt: 0,
+  pollFails: 0,
 };
 
 const scenarios = () => (state.detail ? state.detail.scenarios : []);
@@ -156,9 +157,22 @@ function render(snap, extrapolate = 0) {
     totals.baseline += base.reduce((a, b) => a + b, 0);
   });
 
-  // KPIs
+  // KPIs — once the race is done the headline is the end-to-end load ratio
+  // (it matches the seconds shown next to it); while running it tracks the
+  // live per-dataset ratios, which include queueing and can run far higher.
   $("kpis").hidden = false;
-  $("k-speedup").textContent = ratios.length ? geomean(ratios).toFixed(1) + "×" : "–";
+  const sum = snap.status === "done" ? snap.summary : null;
+  const sub = $("k-speedup-sub");
+  if (sum && sum.load_speedup) {
+    $("k-speedup").textContent = sum.load_speedup.toFixed(1) + "×";
+    $("k-speedup-label").textContent = "load speedup";
+    sub.textContent = `${fmtS(sum.load_ms.reyden)} vs ${fmtS(sum.load_ms.baseline)} end-to-end`;
+    sub.hidden = false;
+  } else {
+    $("k-speedup").textContent = ratios.length ? geomean(ratios).toFixed(1) + "×" : "–";
+    $("k-speedup-label").textContent = snap.status === "running" ? "per-dataset ratio (live)" : "per-dataset geomean";
+    sub.hidden = true;
+  }
   $("k-wins").textContent = pairs ? `${wins}/${pairs}` : "–";
   const done = results.length;
   const totalQ = snap.scenario_ids.length * snap.runs * 2;
@@ -175,22 +189,32 @@ function render(snap, extrapolate = 0) {
     const ready = Object.values(snap.lanes).every((l) => l.ready);
     line.textContent = ready ? `Racing — all ${snap.scenario_ids.length} dataset queries in flight at once on both warehouses…` : "Warming up both warehouses (excluded from timings)…";
     line.className = ready ? "status-line" : "status-line warming";
+  } else if (snap.status === "failed") {
+    line.textContent = `Race failed: ${snap.error || "unknown error"}`;
+    line.className = "status-line";
+    freezeBars();
   }
 
-  // finished
+  // finished — the banner leads with the end-to-end load verdict (the number
+  // that matches the two wall-clock times); per-dataset wins/geomean follow.
   if (snap.status === "done" && snap.summary) {
     const s = snap.summary;
     const rey = snap.warehouses.reyden, base = snap.warehouses.baseline;
     const banner = $("banner");
     banner.hidden = false;
-    banner.innerHTML = s.geomean_speedup
-      ? `🏁 <b>${esc(rey.name)} ran “${esc(snap.dashboard.name)}” ${s.geomean_speedup.toFixed(1)}× faster</b> —
-         winning ${s.reyden_wins} of ${s.scenario_count} datasets (range ${s.min_speedup.toFixed(1)}×–${s.max_speedup.toFixed(1)}×),
-         on a <b>${esc(rey.size || "?")}</b> Reyden vs the dashboard's <b>${esc(base.size || "?")}</b> ${esc(base.name)}.` +
-        (s.load_ms && s.load_ms.reyden && s.load_ms.baseline
-          ? ` Full dashboard load, all queries at once: <b>${fmtS(s.load_ms.reyden)}</b> vs <b>${fmtS(s.load_ms.baseline)}</b>.`
-          : "")
-      : "Race complete.";
+    const ls = s.load_speedup;
+    const perDs = s.pair_count
+      ? ` Per dataset: ${s.reyden_wins} of ${s.pair_count} wins, geomean ${s.geomean_speedup.toFixed(1)}×
+         (range ${s.min_speedup.toFixed(1)}×–${s.max_speedup.toFixed(1)}×).`
+      : "";
+    banner.innerHTML = ls
+      ? `🏁 <b>${esc(rey.name)} loaded “${esc(snap.dashboard.name)}”
+         ${ls >= 1 ? ls.toFixed(1) + "× faster" : (1 / ls).toFixed(1) + "× slower"}</b> —
+         end-to-end with all queries at once, <b>${fmtS(s.load_ms.reyden)}</b> vs <b>${fmtS(s.load_ms.baseline)}</b>,
+         on a <b>${esc(rey.size || "?")}</b> Reyden vs the dashboard's <b>${esc(base.size || "?")}</b> ${esc(base.name)}.` + perDs
+      : perDs
+        ? `🏁 <b>Race complete</b> — no full load comparison available.` + perDs
+        : "Race complete.";
     line.textContent = "Race complete — run it again or pick another dashboard.";
     line.className = "status-line";
     const laneErr = Object.entries(snap.lanes).find(([, l]) => l.error);
@@ -204,11 +228,26 @@ async function poll() {
   if (!state.race) return;
   try {
     const snap = await getJSON(`/api/race/${state.race}`);
+    state.pollFails = 0;
     state.lastSnap = snap;
     state.lastSnapAt = performance.now();
     render(snap);
-    if (snap.status === "done") stopRace(false);
-  } catch (e) { /* transient — keep polling */ }
+    if (snap.status === "done" || snap.status === "failed") stopRace(false);
+  } catch (e) {
+    // Transient blips are fine, but a gone race (app restarted, race
+    // evicted) would otherwise leave the controls locked forever.
+    if (/No such race/i.test(e.message) || ++state.pollFails >= 8) {
+      $("status-line").textContent = `Lost contact with the race (${e.message}) — reload the page to start over.`;
+      freezeBars();
+      stopRace();
+    }
+  }
+}
+
+// Strip the in-flight shimmer when a race ends without finishing cleanly, so
+// abandoned bars stop animating.
+function freezeBars() {
+  document.querySelectorAll("#track .bar.running").forEach((b) => b.classList.remove("running"));
 }
 
 function animate() {
@@ -245,6 +284,7 @@ async function startRace() {
       }),
     });
     state.race = resp.race_id;
+    state.pollFails = 0;
     state.poll = setInterval(poll, 500);
     if (!state.raf) animate();
   } catch (e) {

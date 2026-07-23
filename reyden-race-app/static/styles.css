@@ -129,6 +129,7 @@ main { max-width: 1060px; margin: 26px auto 60px; padding: 0 24px; display: grid
   -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .kpi-label { color: var(--muted); font-size: 0.72rem; letter-spacing: 0.12em; text-transform: uppercase; font-weight: 600; }
+.kpi-sub { color: var(--muted); font-size: 0.78rem; font-variant-numeric: tabular-nums; }
 .totals { gap: 8px; }
 .total-row { display: flex; align-items: center; gap: 8px; }
 .tag { font-size: 0.62rem; font-weight: 800; letter-spacing: 0.08em; width: 36px; }
