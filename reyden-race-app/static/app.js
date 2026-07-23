@@ -109,6 +109,7 @@ function showPicker() {
   $("kpis").hidden = true;
   $("banner").hidden = true;
   $("edit-sel").hidden = true;
+  $("stop-batch").hidden = true;
   renderPicker();
 }
 
@@ -313,15 +314,19 @@ function render(snap, extrapolate = 0) {
   const line = $("status-line");
   if (snap.status === "validating") {
     const checked = snap.dashboards.filter((d) => !["pending", "validating"].includes(d.status)).length;
-    line.textContent = `Validating permissions (${checked}/${snap.dashboards.length}) — warehouse access + DESCRIBE QUERY compile of every dataset query. No dashboard queries have run yet.`;
+    line.textContent = snap.stopping
+      ? "Stopping — remaining dashboards will be skipped…"
+      : `Validating permissions (${checked}/${snap.dashboards.length}) — warehouse access + DESCRIBE QUERY compile of every dataset query. No dashboard queries have run yet.`;
     line.className = "status-line warming";
   } else if (snap.status === "running") {
     const cur = snap.dashboards.find((d) => d.status === "profiling");
     const finished = snap.dashboards.filter((d) => ["done", "error"].includes(d.status)).length;
     const runnable = snap.dashboards.filter((d) => !["skipped"].includes(d.status)).length;
-    line.textContent = cur
-      ? `Profiling ${finished + 1}/${runnable}: “${cur.name}” — all its dataset queries in flight on both warehouses…`
-      : `Profiling ${finished}/${runnable}…`;
+    line.textContent = snap.stopping
+      ? (cur ? `Stopping — finishing “${cur.name}”, remaining dashboards will be skipped…` : "Stopping…")
+      : cur
+        ? `Profiling ${finished + 1}/${runnable}: “${cur.name}” — all its dataset queries in flight on both warehouses…`
+        : `Profiling ${finished}/${runnable}…`;
     line.className = "status-line";
   } else if (snap.status === "failed") {
     line.textContent = `Batch failed: ${snap.error || "unknown error"}`;
@@ -338,7 +343,10 @@ function render(snap, extrapolate = 0) {
         (s.best && s.best.load_speedup ? `; best: “${esc(s.best.name)}” at ${s.best.load_speedup.toFixed(1)}×` : "") +
         (s.dashboards_skipped ? ` <small>(${s.dashboards_skipped} skipped in validation)</small>` : "") + "."
       : "Batch complete.";
-    line.textContent = "Batch complete — edit the selection or run it again.";
+    const stopped = snap.dashboards.some((d) => d.reason === "stopped by user");
+    line.textContent = stopped
+      ? "Batch stopped early — results cover the dashboards that finished; edit the selection or run it again."
+      : "Batch complete — edit the selection or run it again.";
     line.className = "status-line";
   }
 }
@@ -384,7 +392,26 @@ function stopProfile() {
   state.raf = null;
   setBusy(false);
   $("edit-sel").hidden = false;
+  $("stop-batch").hidden = true;
   updateSelection();
+}
+
+// Cooperative stop: the current dashboard finishes, the rest are skipped,
+// and the batch lands on the normal done path with partial results.
+const STOP_LABEL = "⏹&nbsp; Stop after current dashboard";
+
+async function requestStop() {
+  if (!state.profile) return;
+  const btn = $("stop-batch");
+  btn.disabled = true;
+  btn.innerHTML = "⏹&nbsp; Stopping…";
+  try {
+    await getJSON(`/api/profile/${state.profile}/stop`, { method: "POST" });
+  } catch (e) {
+    btn.disabled = false;
+    btn.innerHTML = STOP_LABEL;
+    $("status-line").textContent = `Could not stop: ${e.message}`;
+  }
 }
 
 async function startProfile() {
@@ -408,6 +435,10 @@ async function startProfile() {
       }),
     });
     state.profile = resp.profile_id;
+    const sb = $("stop-batch");
+    sb.disabled = false;
+    sb.innerHTML = STOP_LABEL;
+    sb.hidden = false;
     state.poll = setInterval(poll, 600);
     if (!state.raf) animate();
   } catch (e) {
@@ -424,6 +455,7 @@ async function init() {
   $("runs-inc").onclick = () => { state.runs = Math.min(3, state.runs + 1); $("runs-val").textContent = state.runs; persistPicks(); };
   $("go").onclick = startProfile;
   $("edit-sel").onclick = showPicker;
+  $("stop-batch").onclick = requestStop;
   $("dash-filter").oninput = () => { state.filter = $("dash-filter").value; renderPicker(); };
   $("sel-all").onchange = () => {
     const shown = filteredDashboards();

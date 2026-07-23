@@ -380,6 +380,23 @@ def _skip(dash: dict, reason: str):
     dash["reason"] = reason
 
 
+def _stopped(profile: dict, awaiting: str) -> bool:
+    """True when the user asked the batch to stop; skips the stragglers.
+
+    Both worker loops call this at the top of each iteration: validation
+    with awaiting="pending", profiling with awaiting="ready". Every
+    dashboard still in that state is skipped so the batch winds down to
+    "done" with partial results — the slot frees when the worker finishes.
+    """
+    with STATE_LOCK:
+        if not profile["stop"]:
+            return False
+    for dash in profile["dashboards"]:
+        if dash["status"] == awaiting:
+            _skip(dash, "stopped by user")
+    return True
+
+
 def _validate_all(profile: dict):
     """Phase 1 — runs to completion before any dataset query executes."""
     w = profile["client"]
@@ -390,6 +407,8 @@ def _validate_all(profile: dict):
         profile["status"] = "failed"
         return
     for dash in profile["dashboards"]:
+        if _stopped(profile, "pending"):
+            break
         dash["status"] = "validating"
         try:
             meta, scenarios = load_dashboard(w, dash["id"])
@@ -568,6 +587,8 @@ def _batch_worker(profile: dict):
             return
         profile["status"] = "running"
         for dash in profile["dashboards"]:
+            if _stopped(profile, "ready"):
+                break
             if dash["status"] != "ready":
                 continue
             dash["status"] = "profiling"
@@ -588,6 +609,7 @@ def _batch_worker(profile: dict):
 def _snapshot(profile: dict) -> dict:
     now = time.time()
     with STATE_LOCK:
+        stopping = profile["stop"]
         dashboards = []
         for d in profile["dashboards"]:
             lanes = None
@@ -616,7 +638,7 @@ def _snapshot(profile: dict) -> dict:
                 "summary": d.get("summary"),
             })
     return {"id": profile["id"], "status": profile["status"], "error": profile["error"],
-            "runs": profile["runs"], "reyden": profile["reyden"],
+            "runs": profile["runs"], "reyden": profile["reyden"], "stopping": stopping,
             "dashboards": dashboards, "summary": profile["summary"]}
 
 
@@ -673,7 +695,7 @@ def warehouses(request: Request):
 def start_profile(req: ProfileRequest, request: Request):
     profile = {
         "id": uuid.uuid4().hex[:10], "status": "validating", "error": None,
-        "created": time.time(), "runs": max(1, min(req.runs, 3)),
+        "created": time.time(), "runs": max(1, min(req.runs, 3)), "stop": False,
         "reyden": None, "client": None, "summary": None, "dashboards": [],
     }
     _claim_slot(profile, PROFILES)
@@ -716,6 +738,23 @@ def profile_state(profile_id: str):
     if profile is None:
         raise HTTPException(404, "No such profile")
     return _snapshot(profile)
+
+
+@app.post("/api/profile/{profile_id}/stop")
+def stop_profile(profile_id: str):
+    """Ask a running batch to stop after the dashboard currently profiling.
+
+    Cooperative and idempotent: sets a flag the worker loops check between
+    dashboards, so the batch still finishes with partial results and frees
+    the slot itself. Statements already in flight are not cancelled; a
+    profile that already ended is unaffected.
+    """
+    profile = PROFILES.get(profile_id)
+    if profile is None:
+        raise HTTPException(404, "No such profile")
+    with STATE_LOCK:
+        profile["stop"] = True
+    return {"stopping": True}
 
 
 # ---------- single-dashboard race (the original mode, served at /race) ----------
