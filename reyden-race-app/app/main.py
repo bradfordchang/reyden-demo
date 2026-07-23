@@ -55,7 +55,8 @@ import uuid
 from pathlib import Path
 
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.sql import Disposition, Format, StatementState
+from databricks.sdk.service.sql import (Disposition, Format, ServiceError,
+                                         ServiceErrorCode, StatementState)
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -68,6 +69,16 @@ STATIC_DIR = APP_DIR.parent / "static"
 LANES = ("reyden", "baseline")
 MAX_DASHBOARDS = 25  # keeps one batch to a sane runtime
 EXPLAIN_POOL = 6     # concurrent validation compiles per dashboard
+
+# Overall wall-clock cap on _run_statement's poll loop. This is NOT a
+# performance knob: a single dashboard dataset query taking 10 minutes is not
+# a real scenario. The cap is deliberately huge so it can NEVER fire on a
+# legitimate query — it exists purely as a hang safety-net. If a warehouse
+# wedges and a statement never reaches a terminal state, the poll loop would
+# otherwise spin forever, the lane worker would never return, and the single
+# global slot would leak — stalling the app for every user until restart. The
+# cap converts that true hang into a normal (cancelled) non-SUCCEEDED result.
+STATEMENT_TIMEOUT_S = 600  # 10 minutes
 
 app = FastAPI(title="Reyden Query Lab")
 _local = None
@@ -339,7 +350,13 @@ def _list_dashboards(w: WorkspaceClient) -> list[dict]:
 
 
 def _run_statement(w: WorkspaceClient, warehouse_id: str, stmt: str, row_limit: int = 1000):
-    """Execute one statement and poll it to a terminal state."""
+    """Execute one statement and poll it to a terminal state.
+
+    Bounded by STATEMENT_TIMEOUT_S (see its comment): if the statement never
+    reaches a terminal state within the cap, it is best-effort cancelled and
+    the still-running resp is returned as-is, so callers treat it as a normal
+    non-SUCCEEDED result instead of the loop spinning forever.
+    """
     resp = w.statement_execution.execute_statement(
         warehouse_id=warehouse_id,
         statement=stmt,
@@ -349,7 +366,24 @@ def _run_statement(w: WorkspaceClient, warehouse_id: str, stmt: str, row_limit: 
         row_limit=row_limit,
     )
     state = resp.status.state if resp.status else None
+    deadline = time.monotonic() + STATEMENT_TIMEOUT_S
     while state in (StatementState.PENDING, StatementState.RUNNING):
+        if time.monotonic() >= deadline:
+            # Genuinely wedged. Cancel is best-effort: never let a cancel
+            # failure mask the timeout. Then hand the non-terminal resp back
+            # with a synthesized error (its own status.error is still empty
+            # while RUNNING) so downstream sees a meaningful non-SUCCEEDED
+            # result rather than an empty error string.
+            try:
+                w.statement_execution.cancel_execution(resp.statement_id)
+            except Exception:
+                pass
+            if resp.status and resp.status.error is None:
+                resp.status.error = ServiceError(
+                    error_code=ServiceErrorCode.DEADLINE_EXCEEDED,
+                    message=f"statement exceeded {STATEMENT_TIMEOUT_S}s cap "
+                            f"and was cancelled")
+            return resp
         time.sleep(0.2)
         resp = w.statement_execution.get_statement(resp.statement_id)
         state = resp.status.state if resp.status else None
