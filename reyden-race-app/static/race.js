@@ -10,9 +10,11 @@ const state = {
   runs: 1,
   race: null, poll: null, raf: null, lastSnap: null, lastSnapAt: 0,
   pollFails: 0,
+  excluded: new Set(),                // scenario ids opted out of the next race
 };
 
 const scenarios = () => (state.detail ? state.detail.scenarios : []);
+const includedIds = () => scenarios().filter((sc) => !state.excluded.has(sc.id)).map((sc) => sc.id);
 
 /* ---------- rendering ---------- */
 
@@ -23,7 +25,10 @@ function updateContenders() {
   const wh = state.detail && state.detail.warehouse;
   $("base-name").textContent = wh ? wh.name : "Dashboard warehouse";
   $("base-meta").textContent = wh ? whMeta(wh, "dashboard's warehouse") : "pick a dashboard";
-  $("go").disabled = !(state.detail && scenarios().length && state.reyId);
+  const total = scenarios().length, included = includedIds().length;
+  $("go").textContent = included < total
+    ? `▶  Start the race (${included} of ${total})` : "▶  Start the race";
+  $("go").disabled = !(state.detail && included && state.reyId);
 }
 
 function buildTrack() {
@@ -35,13 +40,16 @@ function buildTrack() {
   h.textContent = `${state.detail.name} — dataset queries`;
   track.appendChild(h);
   // Dataset names can contain characters that are invalid in DOM ids,
-  // so rows are keyed by scenario index instead.
+  // so rows are keyed by scenario index instead. Excluded rows stay in the
+  // DOM (dimmed) so those indices keep lining up with scenarios().
   scenarios().forEach((sc, i) => {
     const row = document.createElement("div");
-    row.className = "row";
+    const off = state.excluded.has(sc.id);
+    row.className = off ? "row off" : "row";
     row.id = `row-${i}`;
     row.innerHTML = `
-      <div class="label">${esc(sc.label)}<small>${esc(sc.id)}</small></div>
+      <label class="label"><input type="checkbox" ${off ? "" : "checked"}>
+        <span>${esc(sc.label)}<small>${esc(sc.id)}</small></span></label>
       <div class="lanes">
         <div class="lane reyden"><span class="who">REY</span>
           <div class="bar-wrap"><div class="bar" id="bar-${i}-reyden"></div></div>
@@ -52,6 +60,12 @@ function buildTrack() {
       </div>
       <div class="verdict" id="v-${i}"></div>
       <div class="err-detail" id="err-${i}" hidden></div>`;
+    const cb = row.querySelector("input");
+    cb.onchange = () => {
+      if (cb.checked) state.excluded.delete(sc.id); else state.excluded.add(sc.id);
+      row.classList.toggle("off", !cb.checked);
+      updateContenders();
+    };
     track.appendChild(row);
   });
 }
@@ -243,7 +257,7 @@ function animate() {
 
 function setBusy(busy) {
   $("go").disabled = busy;
-  document.querySelectorAll(".picker select, .stepper button").forEach((b) => (b.disabled = busy));
+  document.querySelectorAll(".picker select, .stepper button, #track input").forEach((b) => (b.disabled = busy));
 }
 
 function stopRace(clear = true) {
@@ -254,17 +268,20 @@ function stopRace(clear = true) {
 }
 
 async function startRace() {
-  setBusy(true);
   $("banner").hidden = true;
   buildTrack();
+  setBusy(true); // after buildTrack so the fresh checkboxes get disabled too
   $("status-line").textContent = "Starting…";
   try {
+    const included = includedIds();
     const resp = await getJSON("/api/race", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         dashboard_id: state.detail.id,
         reyden_warehouse_id: state.reyId,
         runs: state.runs,
+        // Only send the filter when the presenter actually excluded something.
+        ...(included.length < scenarios().length ? { scenario_ids: included } : {}),
       }),
     });
     state.race = resp.race_id;
@@ -281,6 +298,7 @@ async function startRace() {
 
 async function pickDashboard(id) {
   state.detail = null;
+  state.excluded.clear(); // exclusions are per-dashboard, per-session
   updateContenders();
   $("dash-links").innerHTML = "";
   $("banner").hidden = true;
