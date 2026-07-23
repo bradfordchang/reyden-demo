@@ -732,6 +732,21 @@ def start_profile(req: ProfileRequest, request: Request):
             "runs": profile["runs"]}
 
 
+@app.get("/api/profile/active")
+def active_profile():
+    """Id of the batch currently validating/running, or null.
+
+    Lets a page reattach to a live batch it has no saved id for (e.g. a
+    second browser). Registered before /api/profile/{profile_id} so the
+    literal path wins.
+    """
+    with STATE_LOCK:
+        for p in PROFILES.values():
+            if p["status"] in ("validating", "running"):
+                return {"profile_id": p["id"]}
+    return {"profile_id": None}
+
+
 @app.get("/api/profile/{profile_id}")
 def profile_state(profile_id: str):
     profile = PROFILES.get(profile_id)

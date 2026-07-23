@@ -385,12 +385,16 @@ async function poll() {
     state.lastSnap = snap;
     state.lastSnapAt = performance.now();
     render(snap);
-    if (snap.status === "done" || snap.status === "failed") stopProfile();
+    if (snap.status === "done" || snap.status === "failed") {
+      savePrefs({ profileId: null });
+      stopProfile();
+    }
   } catch (e) {
     // Transient blips are fine, but a gone profile (app restarted, profile
     // evicted) would otherwise leave the controls locked forever.
     if (/No such profile/i.test(e.message) || ++state.pollFails >= 8) {
       $("status-line").textContent = `Lost contact with the batch (${e.message}) — reload the page to start over.`;
+      savePrefs({ profileId: null });
       stopProfile();
     }
   }
@@ -459,6 +463,7 @@ async function startProfile() {
       }),
     });
     state.profile = resp.profile_id;
+    savePrefs({ profileId: state.profile });
     const sb = $("stop-batch");
     sb.disabled = false;
     sb.innerHTML = STOP_LABEL;
@@ -470,6 +475,49 @@ async function startProfile() {
     stopProfile();
     showPicker();
   }
+}
+
+/* ---------- reattach after a reload ---------- */
+
+// A batch left running in this tab survives a reload: the profile id is
+// persisted on start and the server snapshot is complete (ids, names, lanes,
+// summaries), so the page picks up exactly where the poll loop left off.
+// /api/profile/active arbitrates first — it says which batch (if any) is
+// live, so a stale saved id is cleared without ever fetching a 404, and a
+// batch started elsewhere (second browser that would otherwise just see
+// 409s) is adopted. Returns true when reattached; anything stale falls
+// through to the picker.
+async function reattach(profileId) {
+  let active = null;
+  try { active = (await getJSON("/api/profile/active")).profile_id; } catch { /* no-op */ }
+  if (!active) {
+    if (profileId) savePrefs({ profileId: null }); // saved batch already ended
+    return false;
+  }
+  profileId = active; // saved id either matches or lost to a newer batch
+  let snap = null;
+  try { snap = await getJSON(`/api/profile/${profileId}`); } catch { /* just evicted */ }
+  if (!snap || !["validating", "running"].includes(snap.status)) {
+    savePrefs({ profileId: null });
+    return false;
+  }
+  state.profile = profileId;
+  savePrefs({ profileId });
+  updateSelection();
+  setBusy(true);
+  $("picker-card").hidden = true;
+  $("edit-sel").hidden = true;
+  buildTrack(snap.dashboards);
+  const sb = $("stop-batch");
+  sb.disabled = !!snap.stopping;
+  sb.innerHTML = snap.stopping ? "⏹&nbsp; Stopping…" : STOP_LABEL;
+  sb.hidden = false;
+  state.lastSnap = snap;
+  state.lastSnapAt = performance.now();
+  render(snap);
+  state.poll = setInterval(poll, 600);
+  if (!state.raf) animate();
+  return true;
 }
 
 /* ---------- init ---------- */
@@ -528,6 +576,10 @@ async function init() {
     state.runs = Math.min(3, Math.max(1, Math.round(saved.runs)));
     $("runs-val").textContent = state.runs;
   }
+
+  // A batch that was validating/running when this tab last unloaded takes
+  // over the page; otherwise fall through to the normal picker flow.
+  if (await reattach(saved.profileId)) return;
 
   $("status-line").textContent =
     wl.status === "rejected" ? `Warehouses: ${wl.reason.message}`
