@@ -171,19 +171,20 @@ def warehouse_info(w: WorkspaceClient, wh_id: str) -> dict:
                   "type": None, "serverless": None, "state": None}
 
 
-# Lakeview stores dynamic range defaults as date-math: "now", an optional
-# signed offset and an optional unit to round to ("now-90d/d", "now-6M/M").
-_DATE_MATH = re.compile(r"now(?:([+-]\d+)([smhdwMy]))?(?:/([dwMy]))?")
+# Lakeview stores dynamic date defaults as date-math: "now", an optional
+# signed offset and an optional unit to round to ("now-90d/d", "now-1h/h").
+_DATE_MATH = re.compile(r"now(?:([+-]\d+)([smhdwMy]))?(?:/([smhdwMy]))?")
 _UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
 
 
 def _range_bound(bound: dict | None, data_type: str, end: bool) -> str:
-    """One side of a DATE/DATETIME RANGE default as an unquoted literal.
+    """A DATE/DATETIME default ({"value": …}) as an unquoted literal.
 
     Date-math resolves against now; the min bound rounds down to the start
     of the rounding unit and the max up to its end, matching how the UI
     stores absolute ranges (max lands on T23:59:59.999). Absolute defaults
     pass through unchanged; an absent default yields "" (caller skips it).
+    Value (non-range) defaults resolve with end=False.
     """
     val = str((bound or {}).get("value", ""))
     m = _DATE_MATH.fullmatch(val)
@@ -206,9 +207,13 @@ def _range_bound(bound: dict | None, data_type: str, end: bool) -> str:
     elif rnd == "y":
         t = t.replace(month=12, day=31) if end else t.replace(month=1, day=1)
     if data_type == "DATETIME":
-        if rnd:
+        if rnd in ("d", "w", "M", "y"):
             t = t.replace(hour=23, minute=59, second=59) if end \
                 else t.replace(hour=0, minute=0, second=0)
+        elif rnd == "h":
+            t = t.replace(minute=59, second=59) if end else t.replace(minute=0, second=0)
+        elif rnd == "m":
+            t = t.replace(second=59) if end else t.replace(second=0)
         return t.strftime("%Y-%m-%dT%H:%M:%S")
     return t.strftime("%Y-%m-%d")
 
@@ -240,7 +245,11 @@ def load_dashboard(w: WorkspaceClient, dashboard_id: str) -> tuple[dict, list[di
                         sql = sql.replace(f":{kw}.{side}", "'" + lit.replace("'", "''") + "'")
                 continue
             vals = (dsel.get("values") or {}).get("values") or []
-            val = str(vals[0].get("value", "")) if vals else ""
+            if vals and p.get("dataType") in ("DATE", "DATETIME"):
+                # Value defaults can be date-math too ("now-1h/h"): floor like a min.
+                val = _range_bound(vals[0], p["dataType"], False)
+            else:
+                val = str(vals[0].get("value", "")) if vals else ""
             sql = sql.replace(f":{kw}", "'" + val.replace("'", "''") + "'")
         scenarios.append({"id": ds.get("name") or f"dataset-{len(scenarios) + 1}",
                           "label": ds.get("displayName") or ds.get("name") or "dataset",

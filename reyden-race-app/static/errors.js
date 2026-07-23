@@ -7,7 +7,8 @@ const errMsg = (msg) => (msg || "").replace(/^\s*\[[A-Z0-9_.]+\]\s*/, "");
 
 const ERROR_HINTS = {
   DIVIDE_BY_ZERO: "The query divides by a value that is 0 for some row — engines differ in ANSI strictness, so one may raise an error where the other returns NULL. Portable fix in the dashboard SQL: try_divide() or NULLIF().",
-  INVALID_EXTRACT_BASE_FIELD_TYPE: "This dataset uses a dashboard parameter in a form the race can't emulate yet (e.g. a date-range parameter read as :param.min/:param.max), so the substituted SQL is invalid. This is a race-harness limitation, not a warehouse problem.",
+  INVALID_EXTRACT_BASE_FIELD_TYPE: "The dashboard-parameter substitution produced a value this expression can't operate on — the substituted SQL is invalid, not the warehouse. Check the dashboard parameter's default value; it likely isn't a valid date/time for how the query uses it.",
+  UNBOUND_SQL_PARAMETER: "This dataset references a dashboard parameter that has no default value, so the race leaves it unsubstituted. The dashboard itself couldn't run this dataset without user input either.",
 };
 
 function explainError(reyErr, baseErr) {
