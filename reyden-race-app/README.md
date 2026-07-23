@@ -15,6 +15,9 @@ Databricks App with two modes behind a shared nav:
   its dataset queries head-to-head on the two warehouses, live.
 
 Both modes share one "running" slot (they compete for the same warehouses).
+Dashboards configured to run *on* a Reyden warehouse are excluded from both
+modes — their baseline lane would be the Reyden warehouse itself, so there is
+nothing to race.
 
 - **Validation before any query runs**: `POST /api/profile` first runs a
   validation phase over the entire batch — the Reyden warehouse and each

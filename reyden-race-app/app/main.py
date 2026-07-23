@@ -193,13 +193,29 @@ def load_dashboard(w: WorkspaceClient, dashboard_id: str) -> tuple[dict, list[di
     return meta, scenarios
 
 
+def _reyden_warehouse_ids(w: WorkspaceClient) -> set[str]:
+    """Ids of the Reyden warehouses visible to the user (empty on failure)."""
+    try:
+        all_wh = _get(w, "/api/2.0/sql/warehouses").get("warehouses", [])
+    except Exception:
+        return set()
+    return {x["id"] for x in all_wh if x.get("warehouse_type") == "REYDEN"}
+
+
 def _list_dashboards(w: WorkspaceClient) -> list[dict]:
-    """Active AI/BI dashboards visible to `w`, newest first, warehouse required."""
+    """Active AI/BI dashboards visible to `w`, newest first, warehouse required.
+
+    Dashboards configured to run *on* a Reyden warehouse are excluded: their
+    baseline lane would be the Reyden warehouse itself, so a race against it
+    is meaningless.
+    """
+    reyden_ids = _reyden_warehouse_ids(w)
     items, page_token = [], None
     while len(items) < 1000:
         page = _lakeview_get(w, "/api/2.0/lakeview/dashboards", page_size=100, page_token=page_token)
         for d in page.get("dashboards", []):
-            if d.get("lifecycle_state") == "ACTIVE" and d.get("warehouse_id"):
+            if (d.get("lifecycle_state") == "ACTIVE" and d.get("warehouse_id")
+                    and d["warehouse_id"] not in reyden_ids):
                 items.append({"id": d["dashboard_id"],
                               "name": d.get("display_name") or d["dashboard_id"],
                               "warehouse_id": d["warehouse_id"],
@@ -326,6 +342,10 @@ def _validate_all(profile: dict):
         baseline, werr = check_warehouse(w, meta["warehouse_id"])
         if werr:
             _skip(dash, werr)
+            continue
+        if baseline.get("type") == "REYDEN":
+            _skip(dash, f"runs on Reyden warehouse '{baseline['name']}' — "
+                        f"no baseline to race against")
             continue
         dash["warehouses"] = {"reyden": profile["reyden"], "baseline": baseline}
         # Compile every dataset on the dashboard's own warehouse: proves CAN USE
@@ -677,11 +697,14 @@ def start_race(req: RaceRequest, request: Request):
         reyden = warehouse_info(w, req.reyden_warehouse_id)
         if reyden.get("type") and reyden["type"] != "REYDEN":
             raise HTTPException(400, f"Warehouse '{reyden['name']}' is not a Reyden warehouse.")
+        baseline = warehouse_info(w, meta["warehouse_id"])
+        if baseline.get("type") == "REYDEN":
+            raise HTTPException(400, f"“{meta['name']}” runs on Reyden warehouse "
+                                     f"'{baseline['name']}' — there is no baseline to race against.")
         race.update({
             "client": w,
             "dashboard": {"id": meta["id"], "name": meta["name"]},
-            "warehouses": {"reyden": reyden,
-                           "baseline": warehouse_info(w, meta["warehouse_id"])},
+            "warehouses": {"reyden": reyden, "baseline": baseline},
             "scenarios": scenarios,
             "scenario_ids": [s["id"] for s in scenarios],
             "lanes": {lane: {"inflight": {}, "run_wall_ms": [], "done": False,
