@@ -87,7 +87,7 @@ def _claim_slot(entry: dict, registry: dict):
     """
     with STATE_LOCK:
         if any(p["status"] in ("validating", "running") for p in PROFILES.values()) \
-                or any(r["status"] == "running" for r in RACES.values()):
+                or any(r["status"] in ("starting", "running") for r in RACES.values()):
             raise HTTPException(409, "Another race or batch profile is already running — "
                                      "wait for it to finish.")
         registry[entry["id"]] = entry
@@ -850,10 +850,15 @@ def _race_worker(race: dict):
 
 @app.post("/api/race")
 def start_race(req: RaceRequest, request: Request):
+    # Born "starting", not "running": the snapshot-critical fields below don't
+    # exist yet, so a race must not be reported as fully live until they do.
+    # The keys are pre-seeded so race_state can never KeyError if polled during
+    # this ~1s setup window (belt and suspenders on top of the status gate).
     race = {
-        "id": uuid.uuid4().hex[:10], "status": "running", "error": None,
+        "id": uuid.uuid4().hex[:10], "status": "starting", "error": None,
         "created": time.time(), "runs": max(1, min(req.runs, 3)),
         "summary": None, "results": [],
+        "dashboard": None, "warehouses": None, "scenario_ids": [], "lanes": {},
     }
     _claim_slot(race, RACES)
     try:
@@ -895,6 +900,8 @@ def start_race(req: RaceRequest, request: Request):
         with STATE_LOCK:  # release the slot on any setup failure
             RACES.pop(race["id"], None)
         raise
+    # Fully built — only now is it safe to advertise as running/reattachable.
+    race["status"] = "running"
     threading.Thread(target=_race_worker, args=(race,), daemon=True,
                      name=f"race-{race['id']}").start()
     return {"race_id": race["id"], "scenario_ids": race["scenario_ids"], "runs": race["runs"]}
@@ -902,15 +909,20 @@ def start_race(req: RaceRequest, request: Request):
 
 @app.get("/api/race/active")
 def active_race():
-    """Id of the race currently running, or null.
+    """Id of the race currently starting or running, or null.
 
     Lets the race page reattach to a live race it has no saved id for (e.g.
     after a reload). Registered before /api/race/{race_id} so the literal
     path wins (mirrors /api/profile/active).
+
+    A race is reported the moment its slot is claimed (status "starting"),
+    before setup finishes — so a reload during the ~1s setup window still
+    discovers it and the reattach path can wait for the snapshot to fill in,
+    rather than falling through to the picker and orphaning the running race.
     """
     with STATE_LOCK:
         for r in RACES.values():
-            if r["status"] == "running":
+            if r["status"] in ("starting", "running"):
                 return {"race_id": r["id"]}
     return {"race_id": None}
 

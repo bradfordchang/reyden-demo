@@ -496,12 +496,20 @@ async function reattach(profileId) {
     return false;
   }
   profileId = active; // saved id either matches or lost to a newer batch
+  // /api/profile/active reports a batch as soon as its slot is claimed, before
+  // profile["dashboards"] is populated, so a reload in that setup window would
+  // otherwise build a permanently-blank track from an empty snapshot. Poll
+  // until the dashboards land; a gone (404) or finished batch clears the pref.
   let snap = null;
-  try { snap = await getJSON(`/api/profile/${profileId}`); } catch { /* just evicted */ }
-  if (!snap || !["validating", "running"].includes(snap.status)) {
-    savePrefs({ profileId: null });
-    return false;
+  for (let tries = 0; tries < 10; tries++) {
+    let s = null;
+    try { s = await getJSON(`/api/profile/${profileId}`); }
+    catch { savePrefs({ profileId: null }); return false; } // 404 — just evicted
+    if (!["validating", "running"].includes(s.status)) { savePrefs({ profileId: null }); return false; }
+    if (s.dashboards && s.dashboards.length) { snap = s; break; } // track is renderable
+    await sleep(400); // still setting up — wait, don't build a blank track
   }
+  if (!snap) return false; // never became ready within the bound (shouldn't happen)
   state.profile = profileId;
   savePrefs({ profileId });
   updateSelection();

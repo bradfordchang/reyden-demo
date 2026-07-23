@@ -8,6 +8,7 @@ const median = (a) => { const s = [...a].sort((x, y) => x - y); const m = s.leng
 const geomean = (a) => Math.exp(a.reduce((t, x) => t + Math.log(x), 0) / a.length);
 const esc = (s) => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; };
 const escAttr = (s) => esc(s).replace(/"/g, "&quot;");
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function getJSON(url, opts) {
   const r = await fetch(url, opts);

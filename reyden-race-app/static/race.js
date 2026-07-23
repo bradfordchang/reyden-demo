@@ -232,7 +232,7 @@ async function poll() {
     render(snap);
     if (snap.status === "done" || snap.status === "failed") {
       savePrefs({ raceId: null }); // terminal — nothing to reattach to
-      stopRace(false);
+      stopRace();
     }
   } catch (e) {
     // Transient blips are fine, but a gone race (app restarted, race
@@ -264,9 +264,10 @@ function setBusy(busy) {
   document.querySelectorAll(".picker select, .stepper button, #track input").forEach((b) => (b.disabled = busy));
 }
 
-function stopRace(clear = true) {
+function stopRace() {
   clearInterval(state.poll);
-  if (clear) { cancelAnimationFrame(state.raf); state.raf = null; }
+  cancelAnimationFrame(state.raf);
+  state.raf = null;
   setBusy(false);
   updateContenders();
 }
@@ -310,10 +311,21 @@ async function startRace() {
 async function reattach() {
   let raceId = null;
   try { raceId = (await getJSON("/api/race/active")).race_id; } catch { /* no-op */ }
-  if (!raceId) { savePrefs({ raceId: null }); return false; } // saved race already ended
+  if (!raceId) { savePrefs({ raceId: null }); return false; } // no race live — nothing to reattach to
+  // /api/race/active reports a race the moment its slot is claimed, so during
+  // the ~1s setup window the snapshot has no dashboard/lanes yet. Poll until
+  // it's renderable rather than building a blank track once and never
+  // recovering; a genuinely gone (404) or finished race clears the pref.
   let snap = null;
-  try { snap = await getJSON(`/api/race/${raceId}`); } catch { /* just evicted */ }
-  if (!snap || snap.status !== "running") { savePrefs({ raceId: null }); return false; }
+  for (let tries = 0; tries < 10; tries++) {
+    let s = null;
+    try { s = await getJSON(`/api/race/${raceId}`); }
+    catch { savePrefs({ raceId: null }); return false; } // 404 — race just evicted
+    if (s.status === "done" || s.status === "failed") { savePrefs({ raceId: null }); return false; }
+    if (s.status === "running" && s.dashboard) { snap = s; break; } // fully set up — build it
+    await sleep(400); // still starting — wait, don't paint a half-built snapshot
+  }
+  if (!snap) return false; // never became ready within the bound (shouldn't happen) — keep the slot, show picker
   // Scenario labels only come from the dashboard, not the race snapshot.
   try { state.detail = await getJSON(`/api/dashboards/${encodeURIComponent(snap.dashboard.id)}`); }
   catch { return false; } // can't rebuild the track without labels — keep the slot, show the picker
