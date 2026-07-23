@@ -34,11 +34,26 @@ DATABRICKS_CONFIG_PROFILE=<profile> uv run uvicorn app.main:app --reload --port 
 
 ## Deploy
 
+Deploy straight from this public Git repository — no workspace sync needed:
+
 ```bash
 databricks apps create <app-name> --profile <profile>   # once — no resources needed
-databricks sync . /Workspace/Users/<you>/reyden-race-app --profile <profile>
-databricks apps deploy <app-name> --source-code-path /Workspace/Users/<you>/reyden-race-app --profile <profile>
+
+# once: link the app to the repo
+databricks apps update <app-name> --profile <profile> --json '{
+  "git_repository": {"provider": "gitHub", "url": "https://github.com/bradfordchang/reyden-demo"},
+  "user_api_scopes": ["sql"]
+}'
+
+# every deploy: snapshot of main, app source in the reyden-race-app/ subdirectory
+databricks apps deploy <app-name> --profile <profile> --json '{
+  "mode": "SNAPSHOT",
+  "git_source": {"branch": "main", "source_code_path": "reyden-race-app"}
+}'
 ```
+
+(Workspace-path deploys still work too: `databricks sync . /Workspace/Users/<you>/reyden-race-app`
+then `databricks apps deploy <app-name> --source-code-path ...`.)
 
 Then enable **user authorization** on the app with the `sql` API scope
 (Compute → Apps → the app → Edit → Authorization → add scope), or via the CLI:
