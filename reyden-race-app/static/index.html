@@ -14,27 +14,36 @@
   <div class="badge">DATABRICKS APP · LIVE DEMO</div>
   <h1>The <span class="rey">Reyden</span> Query Race</h1>
   <p class="sub">
-    Two SQL warehouses. The exact same AI/BI cost dashboard queries, on the same
-    260M-row clustered billing data, cache-busted, raced head-to-head — live.
+    Pick any AI/BI dashboard you can access. Its dataset queries run cache-busted,
+    head-to-head — a Reyden warehouse vs the dashboard's own warehouse — live.
   </p>
   <p class="links" id="dash-links"></p>
 </header>
 
 <main>
   <section class="card controls">
+    <div class="pickers">
+      <label class="picker">
+        <span>Dashboard</span>
+        <select id="dash-select"><option value="">Loading dashboards…</option></select>
+      </label>
+      <label class="picker">
+        <span>Reyden warehouse</span>
+        <select id="rey-select"><option value="">Loading…</option></select>
+      </label>
+    </div>
     <div class="contenders">
       <div class="contender reyden">
         <div class="dot"></div>
-        <div><div class="name">Reyden</div><div class="meta" id="rey-meta">Small · serverless</div></div>
+        <div><div class="name" id="rey-name">Reyden</div><div class="meta" id="rey-meta">pick a warehouse</div></div>
       </div>
       <div class="vs">VS</div>
-      <div class="contender starter">
+      <div class="contender baseline">
         <div class="dot"></div>
-        <div><div class="name">Serverless Starter</div><div class="meta" id="st-meta">X-Large Pro · serverless</div></div>
+        <div><div class="name" id="base-name">Dashboard warehouse</div><div class="meta" id="base-meta">pick a dashboard</div></div>
       </div>
     </div>
     <div class="control-row">
-      <div class="seg" id="preset-seg" role="tablist" aria-label="Scenario preset"></div>
       <div class="runs">
         <span>runs</span>
         <div class="stepper">
@@ -43,9 +52,9 @@
           <button id="runs-inc" aria-label="more runs">+</button>
         </div>
       </div>
-      <button class="go" id="go">▶&nbsp; Start the race</button>
+      <button class="go" id="go" disabled>▶&nbsp; Start the race</button>
     </div>
-    <div class="status-line" id="status-line">Pick a preset and hit start — warehouses warm up first, then every query fires on both engines simultaneously.</div>
+    <div class="status-line" id="status-line">Loading your dashboards and Reyden warehouses…</div>
   </section>
 
   <section class="kpis" id="kpis" hidden>
@@ -54,7 +63,7 @@
     <div class="kpi totals">
       <div class="kpi-label">total engine time</div>
       <div class="total-row"><span class="tag rey">REY</span><div class="total-bar"><i id="t-rey"></i></div><span class="tval" id="tv-rey">–</span></div>
-      <div class="total-row"><span class="tag st">STR</span><div class="total-bar"><i id="t-st"></i></div><span class="tval" id="tv-st">–</span></div>
+      <div class="total-row"><span class="tag base">BASE</span><div class="total-bar"><i id="t-base"></i></div><span class="tval" id="tv-base">–</span></div>
     </div>
     <div class="kpi"><div class="kpi-val" id="k-progress">–</div><div class="kpi-label">queries finished</div></div>
   </section>
@@ -64,12 +73,12 @@
   <section class="track" id="track"></section>
 
   <footer class="method card">
-    <b>Methodology.</b> Scenario SQL is generated from the live Lakeview dashboard datasets
-    (a Unity Catalog metric view over liquid-clustered copies of
-    <code>system.billing</code> tables) and shaped exactly like widget queries — page defaults plus
-    filter/parameter variants. Every statement carries a unique tag to defeat result caches and runs
-    through the SQL Statement Execution API; bars show wall-clock time to results-ready, medians across runs.
-    Both lanes warm up before the start gun so cold starts never skew a lap.
+    <b>Methodology.</b> Scenario SQL is pulled live from the selected dashboard's Lakeview
+    datasets with default parameter values applied — the same queries the dashboard runs to
+    hydrate its widgets. Every statement carries a unique tag to defeat result caches and runs
+    through the SQL Statement Execution API on your identity (on-behalf-of authorization);
+    bars show wall-clock time to results-ready, medians across runs. Both lanes warm up
+    before the start gun so cold starts never skew a lap.
   </footer>
 </main>
 

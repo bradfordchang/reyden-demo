@@ -1,0 +1,3 @@
+# No env vars needed: dashboards, warehouses, and scenarios are all discovered
+# at runtime on behalf of the signed-in user (OBO user authorization).
+command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
