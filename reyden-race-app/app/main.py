@@ -43,9 +43,12 @@ Locally there is no forwarded token, so the default SDK auth chain is used
 """
 import json
 import os
+import re
 import statistics
 import threading
+from calendar import monthrange
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta
 import time
 import uuid
 from pathlib import Path
@@ -168,6 +171,48 @@ def warehouse_info(w: WorkspaceClient, wh_id: str) -> dict:
                   "type": None, "serverless": None, "state": None}
 
 
+# Lakeview stores dynamic range defaults as date-math: "now", an optional
+# signed offset and an optional unit to round to ("now-90d/d", "now-6M/M").
+_DATE_MATH = re.compile(r"now(?:([+-]\d+)([smhdwMy]))?(?:/([dwMy]))?")
+_UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days", "w": "weeks"}
+
+
+def _range_bound(bound: dict | None, data_type: str, end: bool) -> str:
+    """One side of a DATE/DATETIME RANGE default as an unquoted literal.
+
+    Date-math resolves against now; the min bound rounds down to the start
+    of the rounding unit and the max up to its end, matching how the UI
+    stores absolute ranges (max lands on T23:59:59.999). Absolute defaults
+    pass through unchanged; an absent default yields "" (caller skips it).
+    """
+    val = str((bound or {}).get("value", ""))
+    m = _DATE_MATH.fullmatch(val)
+    if not m:
+        return val
+    off, unit, rnd = m.groups()
+    t = datetime.now()
+    if off:
+        n = int(off)
+        if unit in ("M", "y"):
+            months = t.year * 12 + t.month - 1 + n * (12 if unit == "y" else 1)
+            y, mo = divmod(months, 12)
+            t = t.replace(year=y, month=mo + 1, day=min(t.day, monthrange(y, mo + 1)[1]))
+        else:
+            t += timedelta(**{_UNITS[unit]: n})
+    if rnd == "w":
+        t += timedelta(days=6 - t.weekday() if end else -t.weekday())
+    elif rnd == "M":
+        t = t.replace(day=monthrange(t.year, t.month)[1] if end else 1)
+    elif rnd == "y":
+        t = t.replace(month=12, day=31) if end else t.replace(month=1, day=1)
+    if data_type == "DATETIME":
+        if rnd:
+            t = t.replace(hour=23, minute=59, second=59) if end \
+                else t.replace(hour=0, minute=0, second=0)
+        return t.strftime("%Y-%m-%dT%H:%M:%S")
+    return t.strftime("%Y-%m-%d")
+
+
 def load_dashboard(w: WorkspaceClient, dashboard_id: str) -> tuple[dict, list[dict]]:
     """Dashboard metadata plus one scenario per dataset, default params applied."""
     raw = _lakeview_get(w, f"/api/2.0/lakeview/dashboards/{dashboard_id}")
@@ -183,10 +228,20 @@ def load_dashboard(w: WorkspaceClient, dashboard_id: str) -> tuple[dict, list[di
         # Longest keyword first so :date_range is not clobbered by :date.
         for p in sorted(ds.get("parameters", []), key=lambda p: -len(p.get("keyword", ""))):
             kw = p.get("keyword")
-            vals = ((p.get("defaultSelection") or {}).get("values") or {}).get("values") or []
+            if not kw:
+                continue
+            dsel = p.get("defaultSelection") or {}
+            if p.get("complexType") == "RANGE" or "range" in dsel:
+                # Queries reference range params as :kw.min / :kw.max only.
+                rng = dsel.get("range") or {}
+                for side, end in (("min", False), ("max", True)):
+                    lit = _range_bound(rng.get(side), p.get("dataType"), end)
+                    if lit:
+                        sql = sql.replace(f":{kw}.{side}", "'" + lit.replace("'", "''") + "'")
+                continue
+            vals = (dsel.get("values") or {}).get("values") or []
             val = str(vals[0].get("value", "")) if vals else ""
-            if kw:
-                sql = sql.replace(f":{kw}", "'" + val.replace("'", "''") + "'")
+            sql = sql.replace(f":{kw}", "'" + val.replace("'", "''") + "'")
         scenarios.append({"id": ds.get("name") or f"dataset-{len(scenarios) + 1}",
                           "label": ds.get("displayName") or ds.get("name") or "dataset",
                           "sql": sql})
