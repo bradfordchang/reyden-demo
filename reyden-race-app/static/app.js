@@ -1,21 +1,23 @@
-/* Reyden Query Race — frontend */
+/* Reyden Batch Profiler — frontend */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
 const fmtMs = (ms) => ms == null ? "–" : ms >= 10000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms).toLocaleString() + "ms";
 const fmtS = (ms) => ms == null ? "–" : (ms / 1000).toFixed(1) + "s";
-const median = (a) => { const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
 const geomean = (a) => Math.exp(a.reduce((t, x) => t + Math.log(x), 0) / a.length);
 const esc = (s) => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; };
+const escAttr = (s) => esc(s).replace(/"/g, "&quot;");
+
+const LANES = ["reyden", "baseline"];
 
 const state = {
-  dashboards: [], detail: null,       // detail: /api/dashboards/{id} response
   reyden: [], reyId: null,
+  dashboards: [], rowById: {},   // dashboard id -> row index
+  maxBatch: 25,
   runs: 1,
-  race: null, poll: null, raf: null, lastSnap: null, lastSnapAt: 0,
+  profile: null, poll: null, raf: null, lastSnap: null, lastSnapAt: 0,
+  pollFails: 0,
 };
-
-const scenarios = () => (state.detail ? state.detail.scenarios : []);
 
 async function getJSON(url, opts) {
   const r = await fetch(url, opts);
@@ -30,32 +32,52 @@ function whMeta(wh, suffix) {
   return [wh.size, wh.serverless ? "serverless" : null, suffix].filter(Boolean).join(" · ");
 }
 
-function updateContenders() {
+function selectedIds() {
+  return state.dashboards.filter((d, i) => $(`sel-${i}`).checked).map((d) => d.id);
+}
+
+function updateSelection() {
+  const n = selectedIds().length;
   const rey = state.reyden.find((w) => w.id === state.reyId);
   $("rey-name").textContent = rey ? rey.name : "Reyden";
   $("rey-meta").textContent = rey ? whMeta(rey, "Reyden") : "pick a warehouse";
-  const wh = state.detail && state.detail.warehouse;
-  $("base-name").textContent = wh ? wh.name : "Dashboard warehouse";
-  $("base-meta").textContent = wh ? whMeta(wh, "dashboard's warehouse") : "pick a dashboard";
-  $("go").disabled = !(state.detail && scenarios().length && state.reyId);
+  $("dash-count").textContent = state.dashboards.length
+    ? `${n} of ${state.dashboards.length} dashboards selected` : "no dashboards found";
+  const all = $("sel-all");
+  all.checked = n === state.dashboards.length && n > 0;
+  all.indeterminate = n > 0 && n < state.dashboards.length;
+  const over = n > state.maxBatch;
+  const line = $("status-line");
+  if (over) line.textContent = `Batches are limited to ${state.maxBatch} dashboards — deselect ${n - state.maxBatch}.`;
+  else if (line.textContent.startsWith("Batches are limited")) {
+    line.textContent = `${n} dashboard${n === 1 ? "" : "s"} selected — ready to validate & profile.`;
+  }
+  $("go").disabled = !(n && !over && state.reyId);
+}
+
+function chipHTML(text, cls, title) {
+  return `<span class="chip ${cls || ""}" title="${escAttr(title || "")}">${esc(text)}</span>`;
 }
 
 function buildTrack() {
   const track = $("track");
   track.innerHTML = "";
-  if (!scenarios().length) return;
+  state.rowById = {};
+  if (!state.dashboards.length) return;
   const h = document.createElement("div");
   h.className = "page-header";
-  h.textContent = `${state.detail.name} — dataset queries`;
+  h.textContent = "your dashboards — validated first, then profiled";
   track.appendChild(h);
-  // Dataset names can contain characters that are invalid in DOM ids,
-  // so rows are keyed by scenario index instead.
-  scenarios().forEach((sc, i) => {
+  state.dashboards.forEach((d, i) => {
+    state.rowById[d.id] = i;
     const row = document.createElement("div");
-    row.className = "row";
+    row.className = "row dash-row";
     row.id = `row-${i}`;
     row.innerHTML = `
-      <div class="label">${esc(sc.label)}<small>${esc(sc.id)}</small></div>
+      <div class="label dash-label">
+        <input type="checkbox" class="dash-sel" id="sel-${i}" checked>
+        <div>${esc(d.name)}<small id="meta-${i}"></small></div>
+      </div>
       <div class="lanes">
         <div class="lane reyden"><span class="who">REY</span>
           <div class="bar-wrap"><div class="bar" id="bar-${i}-reyden"></div></div>
@@ -64,134 +86,185 @@ function buildTrack() {
           <div class="bar-wrap"><div class="bar" id="bar-${i}-baseline"></div></div>
           <span class="ms" id="ms-${i}-baseline">–</span></div>
       </div>
-      <div class="verdict" id="v-${i}"></div>`;
+      <div class="verdict" id="v-${i}"><span class="chip">idle</span></div>`;
     track.appendChild(row);
+    $(`sel-${i}`).onchange = updateSelection;
   });
 }
 
-function laneTimes(results, scId, lane) {
-  return results.filter((r) => r.scenario_id === scId && r.lane === lane && !r.error).map((r) => r.wall_ms);
+function resetRows() {
+  state.dashboards.forEach((d, i) => {
+    const sel = $(`sel-${i}`).checked;
+    $(`row-${i}`).classList.toggle("off", !sel);
+    $(`row-${i}`).classList.remove("winner-rey");
+    $(`v-${i}`).innerHTML = chipHTML(sel ? "queued" : "not selected", "");
+    $(`meta-${i}`).textContent = "";
+    $(`meta-${i}`).title = "";
+    for (const lane of LANES) {
+      const bar = $(`bar-${i}-${lane}`), ms = $(`ms-${i}-${lane}`);
+      bar.style.width = "0%"; bar.classList.remove("running");
+      ms.textContent = "–"; ms.className = "ms"; ms.title = "";
+    }
+  });
 }
 
 function render(snap, extrapolate = 0) {
-  const results = snap.results;
-  const inflight = {};
-  for (const lane of ["reyden", "baseline"]) {
-    for (const cur of snap.lanes[lane].inflight || []) {
-      inflight[`${cur.scenario_id}|${lane}`] = cur.elapsed_ms + extrapolate;
+  // One scale across the whole batch so bar lengths are comparable between
+  // dashboards; it tracks the longest load time seen (including in-flight).
+  let trackMax = 1;
+  for (const d of snap.dashboards) {
+    for (const lane of LANES) {
+      const med = d.summary && d.summary.load_ms ? d.summary.load_ms[lane] : null;
+      if (med) trackMax = Math.max(trackMax, med);
+      if (d.status === "profiling" && d.lanes) {
+        for (const c of d.lanes[lane].inflight || []) {
+          trackMax = Math.max(trackMax, c.elapsed_ms + extrapolate);
+        }
+      }
     }
   }
 
-  const ratios = [], totals = { reyden: 0, baseline: 0 };
-  let wins = 0, pairs = 0;
+  for (const d of snap.dashboards) {
+    const i = state.rowById[d.id];
+    if (i == null) continue;
+    const row = $(`row-${i}`), meta = $(`meta-${i}`), v = $(`v-${i}`);
 
-  // All rows share one scale so bar lengths are comparable across datasets;
-  // it tracks the longest time seen (including in-flight), so every bar
-  // rescales as the leader grows.
-  const rows = scenarios().map((sc) => {
-    const rey = laneTimes(results, sc.id, "reyden");
-    const base = laneTimes(results, sc.id, "baseline");
-    return {
-      rey, base,
-      reyMed: rey.length ? median(rey) : null,
-      baseMed: base.length ? median(base) : null,
-      reyLive: inflight[`${sc.id}|reyden`],
-      baseLive: inflight[`${sc.id}|baseline`],
-    };
-  });
-  const trackMax = Math.max(1, ...rows.flatMap((r) => [r.reyMed || 0, r.baseMed || 0, r.reyLive || 0, r.baseLive || 0]));
+    // meta line: baseline warehouse + dataset validation outcome (or skip reason)
+    if (d.status === "skipped") {
+      meta.textContent = d.reason || "skipped";
+      meta.title = d.reason || "";
+    } else if (d.baseline) {
+      const total = d.datasets ? d.datasets.length : null;
+      const ok = (d.scenario_ids || []).length;
+      meta.textContent = `vs ${d.baseline.name}` +
+        (total != null ? ` · ${ok}/${total} datasets validated` : "");
+      const bad = (d.datasets || []).filter((x) => x.error);
+      meta.title = bad.map((x) => `${x.label}: ${x.error}`).join("\n");
+    }
 
-  scenarios().forEach((sc, i) => {
-    const { rey, base, reyMed, baseMed, reyLive, baseLive } = rows[i];
+    // verdict / status chip
+    if (d.status === "done" && d.summary && d.summary.geomean_speedup) {
+      const g = d.summary.geomean_speedup;
+      v.innerHTML = `<span class="flash">${g.toFixed(1)}×</span><small>${g >= 1 ? "REYDEN FASTER" : "BASELINE FASTER"}</small>`;
+      row.classList.toggle("winner-rey", g > 1);
+    } else if (d.status === "done") {
+      v.innerHTML = chipHTML("done", "ok");
+    } else if (d.status === "pending") {
+      v.innerHTML = chipHTML("queued", "");
+    } else if (d.status === "validating") {
+      v.innerHTML = chipHTML("validating…", "warn");
+    } else if (d.status === "ready") {
+      v.innerHTML = chipHTML("validated ✓", "ok");
+    } else if (d.status === "skipped") {
+      v.innerHTML = chipHTML("skipped", "warn", d.reason);
+    } else if (d.status === "error") {
+      v.innerHTML = chipHTML("failed", "err", d.reason);
+    } else if (d.status === "profiling") {
+      v.innerHTML = chipHTML(`racing ${d.queries_done}/${d.queries_total}`, "live");
+    }
 
-    for (const [lane, med, live] of [["reyden", reyMed, reyLive], ["baseline", baseMed, baseLive]]) {
+    // lanes
+    for (const lane of LANES) {
       const bar = $(`bar-${i}-${lane}`), ms = $(`ms-${i}-${lane}`);
-      if (!bar) continue;
-      const err = results.find((r) => r.scenario_id === sc.id && r.lane === lane && r.error);
-      if (live != null) {
+      const st = d.lanes ? d.lanes[lane] : null;
+      const med = d.summary && d.summary.load_ms ? d.summary.load_ms[lane] : null;
+      let live = null;
+      if (d.status === "profiling" && st && st.inflight && st.inflight.length) {
+        live = Math.max(...st.inflight.map((c) => c.elapsed_ms)) + extrapolate;
+      }
+      if (d.status === "profiling" && st && !st.ready && !st.done) {
+        bar.style.width = "0%"; bar.classList.add("running");
+        ms.textContent = "warming…"; ms.className = "ms live";
+      } else if (live != null) {
         bar.style.width = `${Math.min(98, (live / trackMax) * 100)}%`;
         bar.classList.add("running");
-        ms.textContent = fmtMs(live);
-        ms.className = "ms live";
+        ms.textContent = fmtMs(live); ms.className = "ms live";
       } else if (med != null) {
         bar.style.width = `${(med / trackMax) * 100}%`;
         bar.classList.remove("running");
-        ms.textContent = fmtMs(med);
-        ms.className = "ms";
-      } else if (err) {
-        bar.style.width = "100%";
-        bar.classList.remove("running");
-        ms.textContent = "error";
-        ms.className = "ms err";
-        ms.title = err.error;
+        ms.textContent = fmtMs(med); ms.className = "ms";
+      } else if (st && st.error) {
+        bar.style.width = "100%"; bar.classList.remove("running");
+        ms.textContent = "error"; ms.className = "ms err"; ms.title = st.error;
       }
     }
+  }
 
-    const v = $(`v-${i}`);
-    if (reyMed && baseMed) {
-      const ratio = baseMed / reyMed;
-      ratios.push(ratio); pairs++;
-      if (ratio > 1) wins++;
-      v.innerHTML = `<span class="flash">${ratio.toFixed(1)}×</span><small>${ratio >= 1 ? "REYDEN FASTER" : "BASELINE FASTER"}</small>`;
-      $(`row-${i}`).classList.toggle("winner-rey", ratio > 1);
-    } else v.innerHTML = "";
-    totals.reyden += rey.reduce((a, b) => a + b, 0);
-    totals.baseline += base.reduce((a, b) => a + b, 0);
-  });
-
-  // KPIs
+  // KPIs across the batch
+  const ratios = [], totals = { reyden: 0, baseline: 0 };
+  let wins = 0, pairs = 0, qDone = 0, qTotal = 0;
+  for (const d of snap.dashboards) {
+    qDone += d.queries_done || 0; qTotal += d.queries_total || 0;
+    const s = d.summary;
+    if (!s) continue;
+    for (const e of s.per_scenario || []) {
+      if (e.speedup) { ratios.push(e.speedup); pairs++; if (e.speedup > 1) wins++; }
+    }
+    totals.reyden += s.total_ms.reyden || 0;
+    totals.baseline += s.total_ms.baseline || 0;
+  }
   $("kpis").hidden = false;
   $("k-speedup").textContent = ratios.length ? geomean(ratios).toFixed(1) + "×" : "–";
   $("k-wins").textContent = pairs ? `${wins}/${pairs}` : "–";
-  const done = results.length;
-  const totalQ = snap.scenario_ids.length * snap.runs * 2;
-  $("k-progress").textContent = `${done}/${totalQ}`;
+  $("k-progress").textContent = qTotal ? `${qDone}/${qTotal}` : "–";
   const tMax = Math.max(totals.reyden, totals.baseline, 1);
   $("t-rey").style.width = `${(totals.reyden / tMax) * 100}%`;
   $("t-base").style.width = `${(totals.baseline / tMax) * 100}%`;
   $("tv-rey").textContent = fmtS(totals.reyden || null);
   $("tv-base").textContent = fmtS(totals.baseline || null);
 
-  // status
+  // status line + banner
   const line = $("status-line");
-  if (snap.status === "running") {
-    const ready = Object.values(snap.lanes).every((l) => l.ready);
-    line.textContent = ready ? `Racing — all ${snap.scenario_ids.length} dataset queries in flight at once on both warehouses…` : "Warming up both warehouses (excluded from timings)…";
-    line.className = ready ? "status-line" : "status-line warming";
-  }
-
-  // finished
-  if (snap.status === "done" && snap.summary) {
+  if (snap.status === "validating") {
+    const checked = snap.dashboards.filter((d) => !["pending", "validating"].includes(d.status)).length;
+    line.textContent = `Validating permissions (${checked}/${snap.dashboards.length}) — warehouse access + DESCRIBE QUERY compile of every dataset query. No dashboard queries have run yet.`;
+    line.className = "status-line warming";
+  } else if (snap.status === "running") {
+    const cur = snap.dashboards.find((d) => d.status === "profiling");
+    const finished = snap.dashboards.filter((d) => ["done", "error"].includes(d.status)).length;
+    const runnable = snap.dashboards.filter((d) => !["skipped"].includes(d.status)).length;
+    line.textContent = cur
+      ? `Profiling ${finished + 1}/${runnable}: “${cur.name}” — all its dataset queries in flight on both warehouses…`
+      : `Profiling ${finished}/${runnable}…`;
+    line.className = "status-line";
+  } else if (snap.status === "failed") {
+    line.textContent = `Batch failed: ${snap.error || "unknown error"}`;
+    line.className = "status-line";
+  } else if (snap.status === "done") {
     const s = snap.summary;
-    const rey = snap.warehouses.reyden, base = snap.warehouses.baseline;
     const banner = $("banner");
     banner.hidden = false;
-    banner.innerHTML = s.geomean_speedup
-      ? `🏁 <b>${esc(rey.name)} ran “${esc(snap.dashboard.name)}” ${s.geomean_speedup.toFixed(1)}× faster</b> —
-         winning ${s.reyden_wins} of ${s.scenario_count} datasets (range ${s.min_speedup.toFixed(1)}×–${s.max_speedup.toFixed(1)}×),
-         on a <b>${esc(rey.size || "?")}</b> Reyden vs the dashboard's <b>${esc(base.size || "?")}</b> ${esc(base.name)}.` +
-        (s.load_ms && s.load_ms.reyden && s.load_ms.baseline
-          ? ` Full dashboard load, all queries at once: <b>${fmtS(s.load_ms.reyden)}</b> vs <b>${fmtS(s.load_ms.baseline)}</b>.`
-          : "")
-      : "Race complete.";
-    line.textContent = "Race complete — run it again or pick another dashboard.";
+    const g = s && s.geomean_speedup;
+    banner.innerHTML = g
+      ? `🏁 <b>${esc(snap.reyden.name)} ran ${s.dashboards_profiled} dashboard${s.dashboards_profiled === 1 ? "" : "s"}
+         ${g >= 1 ? g.toFixed(1) + "× faster" : (1 / g).toFixed(1) + "× slower"} overall</b> — winning ${s.reyden_wins} of ${s.pair_count} dataset queries` +
+        (s.best ? `; best: “${esc(s.best.name)}” at ${s.best.speedup.toFixed(1)}×` : "") +
+        (s.dashboards_skipped ? ` <small>(${s.dashboards_skipped} skipped in validation)</small>` : "") + "."
+      : "Batch complete.";
+    line.textContent = "Batch complete — adjust the selection or run it again.";
     line.className = "status-line";
-    const laneErr = Object.entries(snap.lanes).find(([, l]) => l.error);
-    if (laneErr) line.textContent = `Lane ${laneErr[0]} failed: ${laneErr[1].error}`;
   }
 }
 
-/* ---------- race loop ---------- */
+/* ---------- profile loop ---------- */
 
 async function poll() {
-  if (!state.race) return;
+  if (!state.profile) return;
   try {
-    const snap = await getJSON(`/api/race/${state.race}`);
+    const snap = await getJSON(`/api/profile/${state.profile}`);
+    state.pollFails = 0;
     state.lastSnap = snap;
     state.lastSnapAt = performance.now();
     render(snap);
-    if (snap.status === "done") stopRace(false);
-  } catch (e) { /* transient — keep polling */ }
+    if (snap.status === "done" || snap.status === "failed") stopProfile();
+  } catch (e) {
+    // Transient blips are fine, but a gone profile (app restarted, profile
+    // evicted) would otherwise leave the controls locked forever.
+    if (/No such profile/i.test(e.message) || ++state.pollFails >= 8) {
+      $("status-line").textContent = `Lost contact with the batch (${e.message}) — reload the page to start over.`;
+      stopProfile();
+    }
+  }
 }
 
 function animate() {
@@ -203,80 +276,64 @@ function animate() {
 
 function setBusy(busy) {
   $("go").disabled = busy;
-  document.querySelectorAll(".picker select, .stepper button").forEach((b) => (b.disabled = busy));
+  document.querySelectorAll(".picker select, .stepper button, .dash-sel, #sel-all")
+    .forEach((b) => (b.disabled = busy));
 }
 
-function stopRace(clear = true) {
+function stopProfile() {
   clearInterval(state.poll);
-  if (clear) { cancelAnimationFrame(state.raf); state.raf = null; }
+  cancelAnimationFrame(state.raf);
+  state.raf = null;
   setBusy(false);
-  updateContenders();
+  updateSelection();
 }
 
-async function startRace() {
+async function startProfile() {
+  const ids = selectedIds();
+  if (!ids.length || !state.reyId) return;
   setBusy(true);
   $("banner").hidden = true;
-  buildTrack();
+  $("kpis").hidden = true;
+  resetRows();
   $("status-line").textContent = "Starting…";
   try {
-    const resp = await getJSON("/api/race", {
+    const resp = await getJSON("/api/profile", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        dashboard_id: state.detail.id,
         reyden_warehouse_id: state.reyId,
+        dashboard_ids: ids,
         runs: state.runs,
       }),
     });
-    state.race = resp.race_id;
-    state.poll = setInterval(poll, 500);
+    state.profile = resp.profile_id;
+    state.poll = setInterval(poll, 600);
     if (!state.raf) animate();
   } catch (e) {
     $("status-line").textContent = `Could not start: ${e.message}`;
-    stopRace();
+    stopProfile();
   }
 }
 
 /* ---------- init ---------- */
 
-async function pickDashboard(id) {
-  state.detail = null;
-  updateContenders();
-  $("dash-links").innerHTML = "";
-  $("banner").hidden = true;
-  $("kpis").hidden = true;
-  $("status-line").textContent = "Loading dashboard datasets…";
-  try {
-    state.detail = await getJSON(`/api/dashboards/${encodeURIComponent(id)}`);
-    const a = document.createElement("a");
-    a.href = state.detail.url; a.target = "_blank";
-    a.textContent = `${state.detail.name} ↗`;
-    $("dash-links").appendChild(a);
-    $("status-line").textContent = state.detail.scenarios.length
-      ? `${state.detail.scenarios.length} dataset queries ready — hit start to race them.`
-      : "This dashboard has no dataset queries to race — pick another one.";
-  } catch (e) {
-    $("status-line").textContent = `Could not load dashboard: ${e.message}`;
-  }
-  buildTrack();
-  updateContenders();
-}
-
 async function init() {
   $("runs-dec").onclick = () => { state.runs = Math.max(1, state.runs - 1); $("runs-val").textContent = state.runs; };
   $("runs-inc").onclick = () => { state.runs = Math.min(3, state.runs + 1); $("runs-val").textContent = state.runs; };
-  $("go").onclick = startRace;
+  $("go").onclick = startProfile;
+  $("sel-all").onchange = () => {
+    const on = $("sel-all").checked;
+    document.querySelectorAll(".dash-sel").forEach((c) => (c.checked = on));
+    updateSelection();
+  };
 
-  // Load the two dropdowns independently so one failure doesn't blank the other.
+  // Load the two lists independently so one failure doesn't blank the other.
   const [dl, wl] = await Promise.allSettled([getJSON("/api/dashboards"), getJSON("/api/warehouses")]);
 
-  const ds = $("dash-select");
-  ds.innerHTML = "";
   if (dl.status === "fulfilled") {
     state.dashboards = dl.value.dashboards;
-    ds.appendChild(new Option("— pick a dashboard —", ""));
-    for (const d of state.dashboards) ds.appendChild(new Option(d.name, d.id));
-    ds.onchange = () => { if (ds.value) pickDashboard(ds.value); };
-  } else ds.appendChild(new Option("failed to load dashboards", ""));
+    state.maxBatch = dl.value.max_batch || state.maxBatch;
+    buildTrack();
+  }
 
   const rs = $("rey-select");
   rs.innerHTML = "";
@@ -285,7 +342,7 @@ async function init() {
     if (!state.reyden.length) rs.appendChild(new Option("no Reyden warehouses available", ""));
     for (const w of state.reyden) rs.appendChild(new Option(`${w.name} (${w.size || "?"})`, w.id));
     state.reyId = state.reyden.length ? state.reyden[0].id : null;
-    rs.onchange = () => { state.reyId = rs.value || null; updateContenders(); };
+    rs.onchange = () => { state.reyId = rs.value || null; updateSelection(); };
   } else rs.appendChild(new Option("failed to load warehouses", ""));
 
   $("status-line").textContent =
@@ -293,8 +350,8 @@ async function init() {
     : dl.status === "rejected" ? `Dashboards: ${dl.reason.message}`
     : !state.reyden.length ? "No Reyden warehouses are visible to you — ask an admin for CAN USE on one."
     : !state.dashboards.length ? "No dashboards found — share a dashboard with the app's service principal, then reload."
-    : `${state.dashboards.length} dashboards${dl.value.user ? ` visible to ${dl.value.user}` : ""} — pick one to race.`;
-  updateContenders();
+    : `${state.dashboards.length} dashboards${dl.value.user ? ` visible to ${dl.value.user}` : ""} — every one is profiled unless you deselect it.`;
+  updateSelection();
 }
 
 init();

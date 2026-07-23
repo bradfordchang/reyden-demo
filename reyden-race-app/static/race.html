@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Reyden Batch Profiler</title>
+<title>Reyden Query Race</title>
 <link rel="stylesheet" href="/static/styles.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
 </head>
@@ -12,23 +12,27 @@
 
 <nav class="topnav">
   <span class="brand">⚡ Reyden Query Lab</span>
-  <a href="/" class="active">Batch Profiler</a>
-  <a href="/race">Single Race</a>
+  <a href="/">Batch Profiler</a>
+  <a href="/race" class="active">Single Race</a>
 </nav>
 
 <header class="hero">
-  <div class="badge">DATABRICKS APP · BATCH PROFILER</div>
-  <h1>The <span class="rey">Reyden</span> Batch Profiler</h1>
+  <div class="badge">DATABRICKS APP · LIVE DEMO</div>
+  <h1>The <span class="rey">Reyden</span> Query Race</h1>
   <p class="sub">
-    Profiles every AI/BI dashboard you have permission to run. Warehouse access and Unity Catalog
-    data permissions are validated up front — no dataset query runs until its dashboard passes —
-    then each dashboard's queries race a Reyden warehouse vs the dashboard's own, cache-busted, live.
+    Pick any AI/BI dashboard you can access. All its dataset queries fire at once, cache-busted,
+    head-to-head — a Reyden warehouse vs the dashboard's own warehouse — live.
   </p>
+  <p class="links" id="dash-links"></p>
 </header>
 
 <main>
   <section class="card controls">
     <div class="pickers">
+      <label class="picker">
+        <span>Dashboard</span>
+        <select id="dash-select"><option value="">Loading dashboards…</option></select>
+      </label>
       <label class="picker">
         <span>Reyden warehouse</span>
         <select id="rey-select"><option value="">Loading…</option></select>
@@ -42,11 +46,10 @@
       <div class="vs">VS</div>
       <div class="contender baseline">
         <div class="dot"></div>
-        <div><div class="name">Each dashboard's warehouse</div><div class="meta" id="dash-count">loading dashboards…</div></div>
+        <div><div class="name" id="base-name">Dashboard warehouse</div><div class="meta" id="base-meta">pick a dashboard</div></div>
       </div>
     </div>
     <div class="control-row">
-      <label class="sel-all"><input type="checkbox" id="sel-all" checked> all dashboards</label>
       <div class="runs">
         <span>runs</span>
         <div class="stepper">
@@ -55,7 +58,7 @@
           <button id="runs-inc" aria-label="more runs">+</button>
         </div>
       </div>
-      <button class="go" id="go" disabled>▶&nbsp; Validate &amp; profile</button>
+      <button class="go" id="go" disabled>▶&nbsp; Start the race</button>
     </div>
     <div class="status-line" id="status-line">Loading your dashboards and Reyden warehouses…</div>
   </section>
@@ -76,20 +79,15 @@
   <section class="track" id="track"></section>
 
   <footer class="method card">
-    <b>Methodology.</b> Before anything runs, a validation pass proves you can actually execute the
-    batch: each warehouse must be visible to you and accept your statements, and every dashboard
-    dataset query is compiled with <code>DESCRIBE QUERY</code> on its dashboard's warehouse — analysis
-    resolves every table and enforces Unity Catalog privileges without reading data, so dashboards
-    or datasets you can't run are skipped with the reason shown. Only then does profiling start:
-    scenario SQL is pulled live from each dashboard's Lakeview datasets (default parameters
-    applied), every statement carries a unique tag to defeat result caches, and each run fires all
-    of a dashboard's queries concurrently — the same burst a real dashboard load sends — through
-    the SQL Statement Execution API on your identity (on-behalf-of authorization). Bars show median
-    dashboard load time per warehouse; both lanes warm up before each start gun so cold starts
-    never skew a lap.
+    <b>Methodology.</b> Scenario SQL is pulled live from the selected dashboard's Lakeview
+    datasets with default parameter values applied — the same queries the dashboard runs to
+    hydrate its widgets. All of a run's queries fire concurrently — the same burst a dashboard sends when it loads. Every statement carries a unique tag to defeat result caches and runs
+    through the SQL Statement Execution API on your identity (on-behalf-of authorization);
+    bars show wall-clock time to results-ready, medians across runs. Both lanes warm up
+    before the start gun so cold starts never skew a lap.
   </footer>
 </main>
 
-<script src="/static/app.js"></script>
+<script src="/static/race.js"></script>
 </body>
 </html>

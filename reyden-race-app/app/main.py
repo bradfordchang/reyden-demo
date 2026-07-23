@@ -1,12 +1,33 @@
-"""Reyden Query Race — Databricks App backend.
+"""Reyden Query Lab — Databricks App backend with two modes behind one nav.
 
-Lets the signed-in user pick any AI/BI (Lakeview) dashboard they can access,
-builds race scenarios live from that dashboard's dataset queries, and races
-them head-to-head: a user-selected Reyden warehouse vs the warehouse the
-dashboard is configured to run on.
+* `/` — Batch Profiler: profiles every AI/BI (Lakeview) dashboard the
+  signed-in user has permission to run. Each dashboard's dataset queries
+  race head-to-head — a user-picked Reyden warehouse vs the warehouse the
+  dashboard is configured to run on — one dashboard at a time, with an
+  aggregate scoreboard.
+* `/race` — Single Race: the original mode; pick one dashboard and race its
+  dataset queries live on the two warehouses.
 
-Auth is on-behalf-of-user for warehouses and the race queries themselves:
-those calls use the token Databricks Apps forwards in
+Both modes share the helpers below and a single "one thing running at a
+time" slot, since they compete for the same warehouses.
+
+In the Batch Profiler, no dataset query executes before a validation phase
+proves the user may run it:
+
+* Warehouses — the Reyden pick and each dashboard's own warehouse must be
+  visible to the user, and both must accept a statement from them
+  (submitting a statement requires CAN USE; the probes read no table data).
+* Data — every dataset query is compiled with DESCRIBE QUERY on the
+  dashboard's warehouse. Analysis resolves each table/view and enforces
+  Unity Catalog privileges, so a missing SELECT grant (or a dropped table)
+  blocks that dataset up front, before profiling starts.
+
+Dashboards that fail validation are skipped (reason shown in the UI);
+datasets that fail are excluded from their dashboard's profile. Profiling
+starts only after every dashboard in the batch has been validated.
+
+Auth is on-behalf-of-user for warehouses, validation, and the profiled
+queries themselves: those calls use the token Databricks Apps forwards in
 `x-forwarded-access-token` (enable user authorization on the app with the
 `sql` scope), so results reflect the user's own permissions and the app's
 service principal needs no data or warehouse access.
@@ -39,15 +60,37 @@ from pydantic import BaseModel
 APP_DIR = Path(__file__).parent
 STATIC_DIR = APP_DIR.parent / "static"
 
-# reyden = the Reyden warehouse the user picked; baseline = the dashboard's own warehouse
+# reyden = the Reyden warehouse the user picked; baseline = each dashboard's own warehouse
 LANES = ("reyden", "baseline")
+MAX_DASHBOARDS = 25  # keeps one batch to a sane runtime
+EXPLAIN_POOL = 6     # concurrent validation compiles per dashboard
 
-app = FastAPI(title="Reyden Query Race")
+app = FastAPI(title="Reyden Query Lab")
 _local = None
 _local_lock = threading.Lock()
 
-RACES: dict[str, dict] = {}
-RACES_LOCK = threading.Lock()
+# STATE_LOCK guards both registries plus every mutable results/inflight dict.
+PROFILES: dict[str, dict] = {}  # batch profiles ("/" page)
+RACES: dict[str, dict] = {}     # single-dashboard races ("/race" page)
+STATE_LOCK = threading.Lock()
+
+
+def _claim_slot(entry: dict, registry: dict):
+    """Register `entry` iff no race or batch is active anywhere — atomically.
+
+    Both modes share the same warehouses, so timings are only meaningful with
+    one thing running at a time. Evicts only finished entries, never a live one.
+    """
+    with STATE_LOCK:
+        if any(p["status"] in ("validating", "running") for p in PROFILES.values()) \
+                or any(r["status"] == "running" for r in RACES.values()):
+            raise HTTPException(409, "Another race or batch profile is already running — "
+                                     "wait for it to finish.")
+        registry[entry["id"]] = entry
+        finished = [k for k in sorted(registry, key=lambda k: registry[k]["created"])
+                    if registry[k]["status"] in ("done", "failed")]
+        for k in finished[:-4]:
+            del registry[k]
 
 
 def _sp_client() -> WorkspaceClient:
@@ -105,23 +148,29 @@ def _wh(raw: dict) -> dict:
             "serverless": raw.get("enable_serverless_compute"), "state": raw.get("state")}
 
 
-def warehouse_info(w: WorkspaceClient, wh_id: str) -> dict:
-    """Warehouse details via raw REST (the SDK enum drops warehouse_type REYDEN)."""
+def check_warehouse(w: WorkspaceClient, wh_id: str) -> tuple[dict | None, str | None]:
+    """(warehouse, None) if the user can see the warehouse, else (None, reason).
+
+    Visibility means at least CAN VIEW; the ability to *run* on it (CAN USE)
+    is proven later by the EXPLAIN probes, which submit real statements.
+    Uses raw REST because the SDK enum drops warehouse_type REYDEN.
+    """
     try:
-        return _wh(_get(w, f"/api/2.0/sql/warehouses/{wh_id}"))
-    except Exception:
-        return {"id": wh_id, "name": f"warehouse {wh_id[:8]}…", "size": None,
-                "type": None, "serverless": None, "state": None}
+        return _wh(_get(w, f"/api/2.0/sql/warehouses/{wh_id}")), None
+    except Exception as e:
+        return None, f"no access to warehouse {wh_id}: {str(e)[:200]}"
+
+
+def warehouse_info(w: WorkspaceClient, wh_id: str) -> dict:
+    """check_warehouse for display purposes: falls back to a stub on failure."""
+    wh, _ = check_warehouse(w, wh_id)
+    return wh or {"id": wh_id, "name": f"warehouse {wh_id[:8]}…", "size": None,
+                  "type": None, "serverless": None, "state": None}
 
 
 def load_dashboard(w: WorkspaceClient, dashboard_id: str) -> tuple[dict, list[dict]]:
     """Dashboard metadata plus one scenario per dataset, default params applied."""
-    try:
-        raw = _lakeview_get(w, f"/api/2.0/lakeview/dashboards/{dashboard_id}")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(404, f"Cannot read dashboard {dashboard_id}: {e}")
+    raw = _lakeview_get(w, f"/api/2.0/lakeview/dashboards/{dashboard_id}")
     meta = {"id": raw.get("dashboard_id", dashboard_id), "name": raw.get("display_name"),
             "warehouse_id": raw.get("warehouse_id")}
     serialized = json.loads(raw.get("serialized_dashboard") or "{}")
@@ -144,117 +193,8 @@ def load_dashboard(w: WorkspaceClient, dashboard_id: str) -> tuple[dict, list[di
     return meta, scenarios
 
 
-def execute_timed(w: WorkspaceClient, warehouse_id: str, sql: str) -> dict:
-    """Run one statement, cache-busted, and return wall-clock timing."""
-    stmt = f"/* race {uuid.uuid4().hex[:12]} */ {sql}"
-    t0 = time.perf_counter()
-    resp = w.statement_execution.execute_statement(
-        warehouse_id=warehouse_id,
-        statement=stmt,
-        wait_timeout="50s",
-        format=Format.JSON_ARRAY,
-        disposition=Disposition.INLINE,
-        row_limit=1000,
-    )
-    state = resp.status.state if resp.status else None
-    while state in (StatementState.PENDING, StatementState.RUNNING):
-        time.sleep(0.2)
-        resp = w.statement_execution.get_statement(resp.statement_id)
-        state = resp.status.state if resp.status else None
-    wall_ms = (time.perf_counter() - t0) * 1000
-    error = None
-    if state != StatementState.SUCCEEDED:
-        error = (resp.status.error.message if resp.status and resp.status.error else str(state))[:300]
-    rows = resp.manifest.total_row_count if resp.manifest else None
-    return {"wall_ms": round(wall_ms, 1), "rows": rows, "error": error,
-            "statement_id": resp.statement_id}
-
-
-def _lane_worker(race: dict, lane: str, scenarios: list[dict], runs: int):
-    w = race["client"]
-    wid = race["warehouses"][lane]["id"]
-    inflight = race["lanes"][lane]["inflight"]
-
-    def one_query(sc: dict, run: int):
-        with RACES_LOCK:
-            inflight[sc["id"]] = {"scenario_id": sc["id"], "run": run,
-                                  "started_at": time.time()}
-        try:
-            r = execute_timed(w, wid, sc["sql"])
-        finally:
-            with RACES_LOCK:
-                inflight.pop(sc["id"], None)
-        with RACES_LOCK:
-            race["results"].append({"lane": lane, "scenario_id": sc["id"], "run": run, **r})
-
-    try:
-        # Warm-up (spins the warehouse up; excluded from results)
-        execute_timed(w, wid, "SELECT 1")
-        race["lanes"][lane]["ready"] = True
-        race["barrier"].wait(timeout=300)  # start both lanes together
-        # Fire every dataset query of a run concurrently — the same burst a
-        # dashboard sends when it loads. Runs stay sequential so each run's
-        # lane wall-clock is a clean "dashboard load time".
-        with ThreadPoolExecutor(max_workers=max(len(scenarios), 1),
-                                thread_name_prefix=f"race-{lane}") as pool:
-            for run in range(1, runs + 1):
-                t0 = time.perf_counter()
-                for f in [pool.submit(one_query, sc, run) for sc in scenarios]:
-                    f.result()
-                race["lanes"][lane]["run_wall_ms"].append(
-                    round((time.perf_counter() - t0) * 1000, 1))
-    except Exception as e:  # surface lane-level failures to the UI
-        race["lanes"][lane]["error"] = str(e)[:300]
-    finally:
-        race["lanes"][lane]["done"] = True
-        if all(l["done"] for l in race["lanes"].values()):
-            race["summary"] = _summarize(race)
-            race["status"] = "done"
-
-
-def _summarize(race: dict) -> dict:
-    med = {}  # (scenario_id, lane) -> median wall
-    for r in race["results"]:
-        if not r["error"]:
-            med.setdefault((r["scenario_id"], r["lane"]), []).append(r["wall_ms"])
-    ratios, per_scenario = [], []
-    for sc_id in race["scenario_ids"]:
-        a = statistics.median(med.get((sc_id, "reyden"), [0]))
-        b = statistics.median(med.get((sc_id, "baseline"), [0]))
-        entry = {"scenario_id": sc_id, "reyden_ms": a or None, "baseline_ms": b or None}
-        if a and b:
-            entry["speedup"] = round(b / a, 2)
-            ratios.append(b / a)
-        per_scenario.append(entry)
-    totals = {lane: round(sum(r["wall_ms"] for r in race["results"]
-                              if r["lane"] == lane and not r["error"]), 1)
-              for lane in LANES}
-    load = {lane: (round(statistics.median(race["lanes"][lane]["run_wall_ms"]), 1)
-                   if race["lanes"][lane]["run_wall_ms"] else None) for lane in LANES}
-    wins = sum(1 for e in per_scenario if e.get("speedup", 0) > 1)
-    return {
-        "geomean_speedup": round(statistics.geometric_mean(ratios), 2) if ratios else None,
-        "min_speedup": round(min(ratios), 2) if ratios else None,
-        "max_speedup": round(max(ratios), 2) if ratios else None,
-        "reyden_wins": wins,
-        "scenario_count": len(per_scenario),
-        "total_ms": totals,
-        "load_ms": load,
-        "per_scenario": per_scenario,
-    }
-
-
-class RaceRequest(BaseModel):
-    dashboard_id: str
-    reyden_warehouse_id: str
-    scenario_ids: list[str] | None = None
-    runs: int = 1
-
-
-@app.get("/api/dashboards")
-def dashboards(request: Request):
-    """AI/BI dashboards the signed-in user can access (with a warehouse set)."""
-    w = client_for(request)
+def _list_dashboards(w: WorkspaceClient) -> list[dict]:
+    """Active AI/BI dashboards visible to `w`, newest first, warehouse required."""
     items, page_token = [], None
     while len(items) < 1000:
         page = _lakeview_get(w, "/api/2.0/lakeview/dashboards", page_size=100, page_token=page_token)
@@ -268,13 +208,334 @@ def dashboards(request: Request):
         if not page_token:
             break
     items.sort(key=lambda d: d["updated"] or "", reverse=True)
-    return {"dashboards": items, "user": request.headers.get("x-forwarded-email")}
+    return items
+
+
+def _run_statement(w: WorkspaceClient, warehouse_id: str, stmt: str, row_limit: int = 1000):
+    """Execute one statement and poll it to a terminal state."""
+    resp = w.statement_execution.execute_statement(
+        warehouse_id=warehouse_id,
+        statement=stmt,
+        wait_timeout="50s",
+        format=Format.JSON_ARRAY,
+        disposition=Disposition.INLINE,
+        row_limit=row_limit,
+    )
+    state = resp.status.state if resp.status else None
+    while state in (StatementState.PENDING, StatementState.RUNNING):
+        time.sleep(0.2)
+        resp = w.statement_execution.get_statement(resp.statement_id)
+        state = resp.status.state if resp.status else None
+    return resp
+
+
+def execute_timed(w: WorkspaceClient, warehouse_id: str, sql: str) -> dict:
+    """Run one statement, cache-busted, and return wall-clock timing."""
+    stmt = f"/* race {uuid.uuid4().hex[:12]} */ {sql}"
+    t0 = time.perf_counter()
+    resp = _run_statement(w, warehouse_id, stmt)
+    wall_ms = (time.perf_counter() - t0) * 1000
+    state = resp.status.state if resp.status else None
+    error = None
+    if state != StatementState.SUCCEEDED:
+        error = (resp.status.error.message if resp.status and resp.status.error else str(state))[:300]
+    rows = resp.manifest.total_row_count if resp.manifest else None
+    return {"wall_ms": round(wall_ms, 1), "rows": rows, "error": error,
+            "statement_id": resp.statement_id}
+
+
+# The Reyden preview engine cannot serialize metadata result sets (DESCRIBE
+# QUERY output): INLINE fetches die with `merge_json_arrays` and
+# EXTERNAL_LINKS is unimplemented. Analysis errors still FAIL the statement
+# properly *before* any result exists, so hitting one of these means the
+# query itself compiled fine — the probe's answer is already known.
+_RESULT_FETCH_QUIRKS = ("merge_json_arrays",
+                        "ExternalLinks disposition is not yet implemented")
+
+
+def _probe(w: WorkspaceClient, warehouse_id: str, sql: str) -> str | None:
+    """Run a validation statement; returns a failure reason or None."""
+    try:
+        resp = _run_statement(w, warehouse_id,
+                              f"/* preflight {uuid.uuid4().hex[:12]} */ {sql}",
+                              row_limit=10)
+    except Exception as e:
+        msg = str(e)
+        if any(q in msg for q in _RESULT_FETCH_QUIRKS):
+            return None
+        return msg[:300]
+    state = resp.status.state if resp.status else None
+    if state != StatementState.SUCCEEDED:
+        return (resp.status.error.message if resp.status and resp.status.error
+                else str(state))[:300]
+    return None
+
+
+def check_can_use(w: WorkspaceClient, warehouse_id: str) -> str | None:
+    """Prove the user can run statements on the warehouse (requires CAN USE).
+
+    SELECT 1 touches no table, so it validates the warehouse permission
+    without reading any data (and warms the warehouse up as a side effect).
+    """
+    return _probe(w, warehouse_id, "SELECT 1")
+
+
+def check_query_compiles(w: WorkspaceClient, warehouse_id: str, sql: str) -> str | None:
+    """Prove the user can run `sql` on `warehouse_id` without reading data.
+
+    DESCRIBE QUERY only analyzes: it resolves every table/view and enforces
+    Unity Catalog privileges — PERMISSION_DENIED, TABLE_OR_VIEW_NOT_FOUND and
+    friends fail the statement — and submitting it at all requires CAN USE on
+    the warehouse. Returns a failure reason, or None when the query is safe
+    to profile.
+    """
+    return _probe(w, warehouse_id, f"DESCRIBE QUERY {sql}")
+
+
+def _skip(dash: dict, reason: str):
+    dash["status"] = "skipped"
+    dash["reason"] = reason
+
+
+def _validate_all(profile: dict):
+    """Phase 1 — runs to completion before any dataset query executes."""
+    w = profile["client"]
+    err = check_can_use(w, profile["reyden"]["id"])
+    if err:
+        profile["error"] = (f"You cannot run statements on Reyden warehouse "
+                            f"'{profile['reyden']['name']}' (need CAN USE): {err}")
+        profile["status"] = "failed"
+        return
+    for dash in profile["dashboards"]:
+        dash["status"] = "validating"
+        try:
+            meta, scenarios = load_dashboard(w, dash["id"])
+        except Exception as e:
+            _skip(dash, f"cannot read dashboard: {str(e)[:200]}")
+            continue
+        dash["name"] = meta["name"] or dash["name"]
+        if not meta["warehouse_id"]:
+            _skip(dash, "no warehouse configured")
+            continue
+        if not scenarios:
+            _skip(dash, "no dataset queries")
+            continue
+        baseline, werr = check_warehouse(w, meta["warehouse_id"])
+        if werr:
+            _skip(dash, werr)
+            continue
+        dash["warehouses"] = {"reyden": profile["reyden"], "baseline": baseline}
+        # Compile every dataset on the dashboard's own warehouse: proves CAN USE
+        # there plus SELECT on everything the query touches, without reading data.
+        with ThreadPoolExecutor(max_workers=min(len(scenarios), EXPLAIN_POOL),
+                                thread_name_prefix=f"preflight-{dash['id'][:8]}") as pool:
+            futures = {sc["id"]: pool.submit(check_query_compiles, w, baseline["id"], sc["sql"])
+                       for sc in scenarios}
+        checks = {sc_id: f.result() for sc_id, f in futures.items()}
+        dash["dataset_checks"] = [{"id": sc["id"], "label": sc["label"],
+                                   "error": checks[sc["id"]]} for sc in scenarios]
+        ok = [sc for sc in scenarios if checks[sc["id"]] is None]
+        if not ok:
+            _skip(dash, "you lack access to the data behind every dataset query")
+            continue
+        dash["scenarios"] = ok
+        dash["scenario_ids"] = [sc["id"] for sc in ok]
+        dash["lanes"] = {lane: {"inflight": {}, "run_wall_ms": [], "done": False,
+                                "ready": False, "error": None} for lane in LANES}
+        dash["status"] = "ready"
+
+
+def _lane_worker(profile: dict, dash: dict, lane: str):
+    w = profile["client"]
+    wid = dash["warehouses"][lane]["id"]
+    st = dash["lanes"][lane]
+    scenarios = dash["scenarios"]
+    runs = profile["runs"]
+
+    def one_query(sc: dict, run: int):
+        with STATE_LOCK:
+            st["inflight"][sc["id"]] = {"scenario_id": sc["id"], "run": run,
+                                        "started_at": time.time()}
+        try:
+            r = execute_timed(w, wid, sc["sql"])
+        finally:
+            with STATE_LOCK:
+                st["inflight"].pop(sc["id"], None)
+        with STATE_LOCK:
+            dash["results"].append({"lane": lane, "scenario_id": sc["id"], "run": run, **r})
+
+    try:
+        # Warm-up (spins the warehouse up; excluded from results)
+        execute_timed(w, wid, "SELECT 1")
+        st["ready"] = True
+        dash["barrier"].wait(timeout=300)  # start both lanes together
+        # Fire every dataset query of a run concurrently — the same burst a
+        # dashboard sends when it loads. Runs stay sequential so each run's
+        # lane wall-clock is a clean "dashboard load time".
+        with ThreadPoolExecutor(max_workers=max(len(scenarios), 1),
+                                thread_name_prefix=f"race-{lane}") as pool:
+            for run in range(1, runs + 1):
+                t0 = time.perf_counter()
+                for f in [pool.submit(one_query, sc, run) for sc in scenarios]:
+                    f.result()
+                st["run_wall_ms"].append(round((time.perf_counter() - t0) * 1000, 1))
+    except Exception as e:  # surface lane-level failures to the UI
+        st["error"] = (str(e) or type(e).__name__)[:300]
+        dash["barrier"].abort()  # free the peer lane instead of a 300s wait
+    finally:
+        st["done"] = True
+
+
+def _summarize(dash: dict) -> dict:
+    med = {}  # (scenario_id, lane) -> median wall
+    for r in dash["results"]:
+        if not r["error"]:
+            med.setdefault((r["scenario_id"], r["lane"]), []).append(r["wall_ms"])
+    ratios, per_scenario = [], []
+    for sc_id in dash["scenario_ids"]:
+        a = statistics.median(med.get((sc_id, "reyden"), [0]))
+        b = statistics.median(med.get((sc_id, "baseline"), [0]))
+        entry = {"scenario_id": sc_id, "reyden_ms": a or None, "baseline_ms": b or None}
+        if a and b:
+            entry["speedup"] = round(b / a, 2)
+            ratios.append(b / a)
+        per_scenario.append(entry)
+    totals = {lane: round(sum(r["wall_ms"] for r in dash["results"]
+                              if r["lane"] == lane and not r["error"]), 1)
+              for lane in LANES}
+    load = {lane: (round(statistics.median(dash["lanes"][lane]["run_wall_ms"]), 1)
+                   if dash["lanes"][lane]["run_wall_ms"] else None) for lane in LANES}
+    wins = sum(1 for e in per_scenario if e.get("speedup", 0) > 1)
+    return {
+        "geomean_speedup": round(statistics.geometric_mean(ratios), 2) if ratios else None,
+        "min_speedup": round(min(ratios), 2) if ratios else None,
+        "max_speedup": round(max(ratios), 2) if ratios else None,
+        "reyden_wins": wins,
+        "scenario_count": len(per_scenario),
+        "total_ms": totals,
+        "load_ms": load,
+        "per_scenario": per_scenario,
+    }
+
+
+def _overall(profile: dict) -> dict:
+    ratios, per_dashboard = [], []
+    wins = pairs = 0
+    totals = {lane: 0.0 for lane in LANES}
+    for dash in profile["dashboards"]:
+        s = dash.get("summary")
+        if not s:
+            continue
+        for e in s["per_scenario"]:
+            if e.get("speedup"):
+                ratios.append(e["speedup"])
+                pairs += 1
+                wins += e["speedup"] > 1
+        for lane in LANES:
+            totals[lane] = round(totals[lane] + s["total_ms"][lane], 1)
+        per_dashboard.append({"id": dash["id"], "name": dash["name"],
+                              "speedup": s["geomean_speedup"]})
+    ranked = sorted((d for d in per_dashboard if d["speedup"]),
+                    key=lambda d: d["speedup"], reverse=True)
+    return {
+        "geomean_speedup": round(statistics.geometric_mean(ratios), 2) if ratios else None,
+        "dashboards_profiled": sum(1 for d in profile["dashboards"] if d["status"] == "done"),
+        "dashboards_skipped": sum(1 for d in profile["dashboards"] if d["status"] == "skipped"),
+        "dashboards_failed": sum(1 for d in profile["dashboards"] if d["status"] == "error"),
+        "reyden_wins": wins,
+        "pair_count": pairs,
+        "total_ms": totals,
+        "per_dashboard": per_dashboard,
+        "best": ranked[0] if ranked else None,
+    }
+
+
+def _run_dashboard(profile: dict, dash: dict):
+    dash["barrier"] = threading.Barrier(len(LANES))
+    threads = [threading.Thread(target=_lane_worker, args=(profile, dash, lane),
+                                daemon=True, name=f"profile-{dash['id'][:8]}-{lane}")
+               for lane in LANES]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    dash["summary"] = _summarize(dash)
+
+
+def _batch_worker(profile: dict):
+    try:
+        _validate_all(profile)
+        if profile["status"] == "failed":
+            return
+        profile["status"] = "running"
+        for dash in profile["dashboards"]:
+            if dash["status"] != "ready":
+                continue
+            dash["status"] = "profiling"
+            _run_dashboard(profile, dash)
+            lane_errors = [st["error"] for st in dash["lanes"].values() if st["error"]]
+            if lane_errors and not any(not r["error"] for r in dash["results"]):
+                dash["status"] = "error"
+                dash["reason"] = lane_errors[0]
+            else:
+                dash["status"] = "done"
+        profile["summary"] = _overall(profile)
+        profile["status"] = "done"
+    except Exception as e:
+        profile["error"] = str(e)[:300]
+        profile["status"] = "failed"
+
+
+def _snapshot(profile: dict) -> dict:
+    now = time.time()
+    with STATE_LOCK:
+        dashboards = []
+        for d in profile["dashboards"]:
+            lanes = None
+            if d.get("lanes"):
+                lanes = {lane: {"ready": st["ready"], "done": st["done"], "error": st["error"],
+                                "inflight": [{**c, "elapsed_ms": round((now - c["started_at"]) * 1000, 1)}
+                                             for c in st["inflight"].values()]}
+                         for lane, st in d["lanes"].items()}
+            dashboards.append({
+                "id": d["id"], "name": d["name"], "status": d["status"],
+                "reason": d.get("reason"),
+                "baseline": (d.get("warehouses") or {}).get("baseline"),
+                "datasets": d.get("dataset_checks"),
+                "scenario_ids": d.get("scenario_ids") or [],
+                "queries_done": len(d.get("results") or []),
+                "queries_total": len(d.get("scenario_ids") or []) * profile["runs"] * len(LANES),
+                "lanes": lanes,
+                "summary": d.get("summary"),
+            })
+    return {"id": profile["id"], "status": profile["status"], "error": profile["error"],
+            "runs": profile["runs"], "reyden": profile["reyden"],
+            "dashboards": dashboards, "summary": profile["summary"]}
+
+
+class ProfileRequest(BaseModel):
+    reyden_warehouse_id: str
+    dashboard_ids: list[str] | None = None  # None -> every dashboard the user can see
+    runs: int = 1
+
+
+@app.get("/api/dashboards")
+def dashboards(request: Request):
+    """AI/BI dashboards the signed-in user can access (with a warehouse set)."""
+    w = client_for(request)
+    return {"dashboards": _list_dashboards(w),
+            "user": request.headers.get("x-forwarded-email"),
+            "max_batch": MAX_DASHBOARDS}
 
 
 @app.get("/api/dashboards/{dashboard_id}")
 def dashboard_detail(dashboard_id: str, request: Request):
+    """Single-race page: dashboard metadata + its raceable dataset scenarios."""
     w = client_for(request)
-    meta, scenarios = load_dashboard(w, dashboard_id)
+    try:
+        meta, scenarios = load_dashboard(w, dashboard_id)
+    except Exception as e:
+        raise HTTPException(404, f"Cannot read dashboard {dashboard_id}: {e}")
     warehouse = warehouse_info(w, meta["warehouse_id"]) if meta["warehouse_id"] else None
     return {"id": meta["id"], "name": meta["name"],
             "url": f"{w.config.host}/sql/dashboardsv3/{meta['id']}",
@@ -301,50 +562,123 @@ def warehouses(request: Request):
     return {"reyden": reyden}
 
 
+@app.post("/api/profile")
+def start_profile(req: ProfileRequest, request: Request):
+    profile = {
+        "id": uuid.uuid4().hex[:10], "status": "validating", "error": None,
+        "created": time.time(), "runs": max(1, min(req.runs, 3)),
+        "reyden": None, "client": None, "summary": None, "dashboards": [],
+    }
+    _claim_slot(profile, PROFILES)
+    try:
+        w = client_for(request)
+        reyden, err = check_warehouse(w, req.reyden_warehouse_id)
+        if err:
+            raise HTTPException(403, f"Reyden warehouse: {err}")
+        if reyden.get("type") and reyden["type"] != "REYDEN":
+            raise HTTPException(400, f"Warehouse '{reyden['name']}' is not a Reyden warehouse.")
+
+        if req.dashboard_ids:
+            ids = list(dict.fromkeys(req.dashboard_ids))  # dedupe, keep order
+            picked = [{"id": i, "name": i} for i in ids]
+        else:
+            picked = [{"id": d["id"], "name": d["name"]} for d in _list_dashboards(w)]
+        if not picked:
+            raise HTTPException(400, "No dashboards to profile — share one with the app or pass dashboard_ids.")
+        if len(picked) > MAX_DASHBOARDS:
+            raise HTTPException(400, f"Batch limited to {MAX_DASHBOARDS} dashboards per run "
+                                     f"({len(picked)} requested) — pass a dashboard_ids subset.")
+        profile["reyden"] = reyden
+        profile["client"] = w
+        profile["dashboards"] = [{"id": d["id"], "name": d["name"], "status": "pending",
+                                  "reason": None, "results": []} for d in picked]
+    except BaseException:
+        with STATE_LOCK:  # release the slot on any setup failure
+            PROFILES.pop(profile["id"], None)
+        raise
+
+    threading.Thread(target=_batch_worker, args=(profile,), daemon=True,
+                     name=f"batch-{profile['id']}").start()
+    return {"profile_id": profile["id"], "dashboard_ids": [d["id"] for d in picked],
+            "runs": profile["runs"]}
+
+
+@app.get("/api/profile/{profile_id}")
+def profile_state(profile_id: str):
+    profile = PROFILES.get(profile_id)
+    if profile is None:
+        raise HTTPException(404, "No such profile")
+    return _snapshot(profile)
+
+
+# ---------- single-dashboard race (the original mode, served at /race) ----------
+# A race is one profile-dashboard rolled into a single dict: it carries both
+# the "profile" keys (client, runs) and the "dash" keys (scenarios, lanes,
+# warehouses, results), so _run_dashboard/_lane_worker/_summarize run it as-is.
+
+class RaceRequest(BaseModel):
+    dashboard_id: str
+    reyden_warehouse_id: str
+    scenario_ids: list[str] | None = None
+    runs: int = 1
+
+
+def _race_worker(race: dict):
+    try:
+        _run_dashboard(race, race)
+        race["status"] = "done"
+    except Exception as e:
+        race["error"] = str(e)[:300]
+        race["status"] = "failed"
+
+
 @app.post("/api/race")
 def start_race(req: RaceRequest, request: Request):
-    with RACES_LOCK:
-        if any(r["status"] == "running" for r in RACES.values()):
-            raise HTTPException(409, "A race is already running — wait for it to finish.")
-    w = client_for(request)
-    meta, scenarios = load_dashboard(w, req.dashboard_id)
-    if not meta["warehouse_id"]:
-        raise HTTPException(400, "This dashboard has no warehouse configured — pick another one.")
-    if not scenarios:
-        raise HTTPException(400, "This dashboard has no dataset queries to race.")
-    if req.scenario_ids:
-        by_id = {s["id"]: s for s in scenarios}
-        unknown = [i for i in req.scenario_ids if i not in by_id]
-        if unknown:
-            raise HTTPException(400, f"Unknown scenarios: {unknown}")
-        scenarios = [by_id[i] for i in req.scenario_ids]
-    runs = max(1, min(req.runs, 3))
-
-    reyden = warehouse_info(w, req.reyden_warehouse_id)
-    if reyden.get("type") and reyden["type"] != "REYDEN":
-        raise HTTPException(400, f"Warehouse '{reyden['name']}' is not a Reyden warehouse.")
-    baseline = warehouse_info(w, meta["warehouse_id"])
-
-    race_id = uuid.uuid4().hex[:10]
     race = {
-        "id": race_id, "status": "running", "created": time.time(),
-        "runs": runs, "scenario_ids": [s["id"] for s in scenarios],
-        "dashboard": {"id": meta["id"], "name": meta["name"]},
-        "warehouses": {"reyden": reyden, "baseline": baseline},
-        "client": w, "results": [], "summary": None,
-        "lanes": {lane: {"inflight": {}, "run_wall_ms": [], "done": False,
-                         "ready": False, "error": None}
-                  for lane in LANES},
-        "barrier": threading.Barrier(len(LANES)),
+        "id": uuid.uuid4().hex[:10], "status": "running", "error": None,
+        "created": time.time(), "runs": max(1, min(req.runs, 3)),
+        "summary": None, "results": [],
     }
-    with RACES_LOCK:
-        RACES[race_id] = race
-        for rid in sorted(RACES, key=lambda r: RACES[r]["created"])[:-10]:
-            del RACES[rid]
-    for lane in LANES:
-        threading.Thread(target=_lane_worker, args=(race, lane, scenarios, runs),
-                         daemon=True, name=f"race-{race_id}-{lane}").start()
-    return {"race_id": race_id, "scenario_ids": race["scenario_ids"], "runs": runs}
+    _claim_slot(race, RACES)
+    try:
+        w = client_for(request)
+        try:
+            meta, scenarios = load_dashboard(w, req.dashboard_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(404, f"Cannot read dashboard {req.dashboard_id}: {e}")
+        if not meta["warehouse_id"]:
+            raise HTTPException(400, "This dashboard has no warehouse configured — pick another one.")
+        if not scenarios:
+            raise HTTPException(400, "This dashboard has no dataset queries to race.")
+        if req.scenario_ids:
+            by_id = {s["id"]: s for s in scenarios}
+            unknown = [i for i in req.scenario_ids if i not in by_id]
+            if unknown:
+                raise HTTPException(400, f"Unknown scenarios: {unknown}")
+            scenarios = [by_id[i] for i in req.scenario_ids]
+
+        reyden = warehouse_info(w, req.reyden_warehouse_id)
+        if reyden.get("type") and reyden["type"] != "REYDEN":
+            raise HTTPException(400, f"Warehouse '{reyden['name']}' is not a Reyden warehouse.")
+        race.update({
+            "client": w,
+            "dashboard": {"id": meta["id"], "name": meta["name"]},
+            "warehouses": {"reyden": reyden,
+                           "baseline": warehouse_info(w, meta["warehouse_id"])},
+            "scenarios": scenarios,
+            "scenario_ids": [s["id"] for s in scenarios],
+            "lanes": {lane: {"inflight": {}, "run_wall_ms": [], "done": False,
+                             "ready": False, "error": None} for lane in LANES},
+        })
+    except BaseException:
+        with STATE_LOCK:  # release the slot on any setup failure
+            RACES.pop(race["id"], None)
+        raise
+    threading.Thread(target=_race_worker, args=(race,), daemon=True,
+                     name=f"race-{race['id']}").start()
+    return {"race_id": race["id"], "scenario_ids": race["scenario_ids"], "runs": race["runs"]}
 
 
 @app.get("/api/race/{race_id}")
@@ -353,16 +687,11 @@ def race_state(race_id: str):
     if race is None:
         raise HTTPException(404, "No such race")
     now = time.time()
-    lanes = {}
-    for lane, st in race["lanes"].items():
-        with RACES_LOCK:
-            cur = list(st["inflight"].values())
-        lanes[lane] = {
-            "ready": st["ready"], "done": st["done"], "error": st["error"],
-            "inflight": [{**c, "elapsed_ms": round((now - c["started_at"]) * 1000, 1)}
-                         for c in cur],
-        }
-    with RACES_LOCK:
+    with STATE_LOCK:
+        lanes = {lane: {"ready": st["ready"], "done": st["done"], "error": st["error"],
+                        "inflight": [{**c, "elapsed_ms": round((now - c["started_at"]) * 1000, 1)}
+                                     for c in st["inflight"].values()]}
+                 for lane, st in race["lanes"].items()}
         results = list(race["results"])
     return {"id": race_id, "status": race["status"], "runs": race["runs"],
             "scenario_ids": race["scenario_ids"], "dashboard": race["dashboard"],
@@ -381,3 +710,8 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/race")
+def race_page():
+    return FileResponse(STATIC_DIR / "race.html")

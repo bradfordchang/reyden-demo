@@ -35,6 +35,20 @@ body {
   background-size: auto, auto, 44px 44px, 44px 44px;
 }
 
+/* ---------- top nav ---------- */
+.topnav {
+  max-width: 1060px; margin: 18px auto 0; padding: 0 24px;
+  display: flex; align-items: center; gap: 8px;
+}
+.topnav .brand { font-weight: 800; letter-spacing: 0.04em; margin-right: auto; font-size: 0.95rem; }
+.topnav a {
+  color: var(--muted); text-decoration: none; font-size: 0.78rem; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  padding: 7px 14px; border-radius: 999px; border: 1px solid transparent;
+}
+.topnav a:hover { color: var(--text); }
+.topnav a.active { color: var(--rey-soft); border-color: rgba(255, 54, 33, 0.35); background: rgba(255, 54, 33, 0.08); }
+
 .hero { max-width: 1060px; margin: 0 auto; padding: 56px 24px 8px; text-align: center; }
 .badge {
   display: inline-block; font-size: 0.68rem; letter-spacing: 0.22em; font-weight: 700;
@@ -173,6 +187,30 @@ main { max-width: 1060px; margin: 26px auto 60px; padding: 0 24px; display: grid
 .verdict .flash { color: var(--win); }
 .verdict small { display: block; font-weight: 600; font-size: 0.62rem; color: var(--muted); letter-spacing: 0.08em; }
 .row.winner-rey { border-color: rgba(255, 122, 61, 0.45); }
+
+/* ---------- batch rows ---------- */
+.dash-label { display: flex; align-items: flex-start; gap: 10px; }
+.dash-label input { margin-top: 3px; accent-color: var(--rey); cursor: pointer; }
+.dash-label input:disabled { cursor: not-allowed; }
+.sel-all {
+  display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.82rem; cursor: pointer;
+}
+.sel-all input { accent-color: var(--rey); cursor: pointer; }
+.row.off { opacity: 0.4; }
+
+.chip {
+  display: inline-block; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--panel-border); color: var(--muted); white-space: nowrap;
+}
+.chip.ok { color: #7ee08a; border-color: rgba(126, 224, 138, 0.35); background: rgba(126, 224, 138, 0.07); }
+.chip.warn { color: var(--win); border-color: rgba(255, 209, 102, 0.35); background: rgba(255, 209, 102, 0.07); }
+.chip.err { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.35); background: rgba(255, 107, 107, 0.07); }
+.chip.live {
+  color: var(--win); border-color: rgba(255, 209, 102, 0.45); background: rgba(255, 209, 102, 0.09);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
 /* ---------- footer ---------- */
 .method { padding: 16px 20px; color: var(--muted); font-size: 0.78rem; line-height: 1.6; }

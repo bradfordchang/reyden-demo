@@ -1,25 +1,47 @@
-# Reyden Query Race
+# Reyden Query Lab
 
-Databricks App that races any AI/BI dashboard's queries live on two SQL
-warehouses: a Reyden warehouse you pick vs the warehouse the dashboard is
-configured to run on.
+Databricks App with two modes behind a shared nav:
 
+- **Batch Profiler** (`/`) — batch-profiles **every AI/BI dashboard the
+  signed-in user has permission to run**: each dashboard's dataset queries
+  race live on two SQL warehouses — a Reyden warehouse you pick vs the
+  warehouse the dashboard is configured to run on — one dashboard at a time,
+  with an aggregate scoreboard across the whole batch.
+- **Single Race** (`/race`) — the original mode: pick one dashboard and race
+  its dataset queries head-to-head on the two warehouses, live.
+
+Both modes share one "running" slot (they compete for the same warehouses).
+
+- **Validation before any query runs**: `POST /api/profile` first runs a
+  validation phase over the entire batch — the Reyden warehouse and each
+  dashboard's own warehouse must be visible to the user and accept their
+  statements (statement submission requires CAN USE), and every dataset query
+  is compiled with `DESCRIBE QUERY` on its dashboard's warehouse, which
+  resolves all tables/views and enforces Unity Catalog privileges **without
+  reading data**.
+  Dashboards that fail are skipped with the reason shown; datasets that fail
+  are excluded. Profiling starts only after every dashboard is validated.
 - **Backend**: FastAPI + databricks-sdk. Lists the AI/BI (Lakeview) dashboards
-  the signed-in user can access, pulls the chosen dashboard's dataset queries
-  live (default parameter values applied), and races them cache-busted via the
-  SQL Statement Execution API — both lanes synchronized with a start barrier
-  after warm-up. The Reyden warehouse picker shows every `warehouse_type:
-  REYDEN` warehouse visible to the user.
-- **Auth**: on-behalf-of-user for warehouses and the race queries (the user
-  token Apps forwards in `x-forwarded-access-token`), so query results reflect
-  the user's own permissions and the SP needs no warehouse or data access.
-  **Interim**: Lakeview reads (dashboard list/detail) fall back to the app's
-  service principal because Apps user authorization has no Lakeview scope yet
-  — share dashboards with the app SP to make them raceable (see Known
-  limitation below). Locally the default SDK auth chain is used
+  the signed-in user can access, pulls each dashboard's dataset queries live
+  (default parameter values applied), and races them cache-busted via the SQL
+  Statement Execution API — both lanes synchronized with a start barrier after
+  warm-up, dashboards profiled sequentially (max 25 per batch). The Reyden
+  warehouse picker shows every `warehouse_type: REYDEN` warehouse visible to
+  the user.
+- **Auth**: on-behalf-of-user for warehouses, validation probes, and the
+  profiled queries (the user token Apps forwards in
+  `x-forwarded-access-token`), so both the permission checks and the results
+  reflect the user's own permissions and the SP needs no warehouse or data
+  access. **Interim**: Lakeview reads (dashboard list/detail) fall back to the
+  app's service principal because Apps user authorization has no Lakeview
+  scope yet — share dashboards with the app SP to make them profilable (see
+  Known limitation below). Locally the default SDK auth chain is used
   (`DATABRICKS_CONFIG_PROFILE`) — you are the user.
-- **Frontend**: static HTML/CSS/JS (no build step), polls `/api/race/{id}`
-  every 500ms and extrapolates in-flight timers client-side.
+- **Frontend**: static HTML/CSS/JS (no build step), polls `/api/profile/{id}`
+  every 600ms and extrapolates in-flight timers client-side. Per-dashboard
+  rows show validation status, live lane bars (median dashboard load time on
+  a shared batch-wide scale), and per-dashboard speedups; KPIs aggregate the
+  whole batch.
 
 ## Configuration
 
