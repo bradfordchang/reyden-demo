@@ -24,6 +24,7 @@ import json
 import os
 import statistics
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
 from pathlib import Path
@@ -172,22 +173,36 @@ def execute_timed(w: WorkspaceClient, warehouse_id: str, sql: str) -> dict:
 def _lane_worker(race: dict, lane: str, scenarios: list[dict], runs: int):
     w = race["client"]
     wid = race["warehouses"][lane]["id"]
+    inflight = race["lanes"][lane]["inflight"]
+
+    def one_query(sc: dict, run: int):
+        with RACES_LOCK:
+            inflight[sc["id"]] = {"scenario_id": sc["id"], "run": run,
+                                  "started_at": time.time()}
+        try:
+            r = execute_timed(w, wid, sc["sql"])
+        finally:
+            with RACES_LOCK:
+                inflight.pop(sc["id"], None)
+        with RACES_LOCK:
+            race["results"].append({"lane": lane, "scenario_id": sc["id"], "run": run, **r})
+
     try:
         # Warm-up (spins the warehouse up; excluded from results)
         execute_timed(w, wid, "SELECT 1")
         race["lanes"][lane]["ready"] = True
         race["barrier"].wait(timeout=300)  # start both lanes together
-        for run in range(1, runs + 1):
-            for sc in scenarios:
-                race["lanes"][lane]["current"] = {
-                    "scenario_id": sc["id"], "run": run, "started_at": time.time(),
-                }
-                r = execute_timed(w, wid, sc["sql"])
-                with RACES_LOCK:
-                    race["results"].append({
-                        "lane": lane, "scenario_id": sc["id"], "run": run, **r,
-                    })
-                race["lanes"][lane]["current"] = None
+        # Fire every dataset query of a run concurrently — the same burst a
+        # dashboard sends when it loads. Runs stay sequential so each run's
+        # lane wall-clock is a clean "dashboard load time".
+        with ThreadPoolExecutor(max_workers=max(len(scenarios), 1),
+                                thread_name_prefix=f"race-{lane}") as pool:
+            for run in range(1, runs + 1):
+                t0 = time.perf_counter()
+                for f in [pool.submit(one_query, sc, run) for sc in scenarios]:
+                    f.result()
+                race["lanes"][lane]["run_wall_ms"].append(
+                    round((time.perf_counter() - t0) * 1000, 1))
     except Exception as e:  # surface lane-level failures to the UI
         race["lanes"][lane]["error"] = str(e)[:300]
     finally:
@@ -214,6 +229,8 @@ def _summarize(race: dict) -> dict:
     totals = {lane: round(sum(r["wall_ms"] for r in race["results"]
                               if r["lane"] == lane and not r["error"]), 1)
               for lane in LANES}
+    load = {lane: (round(statistics.median(race["lanes"][lane]["run_wall_ms"]), 1)
+                   if race["lanes"][lane]["run_wall_ms"] else None) for lane in LANES}
     wins = sum(1 for e in per_scenario if e.get("speedup", 0) > 1)
     return {
         "geomean_speedup": round(statistics.geometric_mean(ratios), 2) if ratios else None,
@@ -222,6 +239,7 @@ def _summarize(race: dict) -> dict:
         "reyden_wins": wins,
         "scenario_count": len(per_scenario),
         "total_ms": totals,
+        "load_ms": load,
         "per_scenario": per_scenario,
     }
 
@@ -314,7 +332,8 @@ def start_race(req: RaceRequest, request: Request):
         "dashboard": {"id": meta["id"], "name": meta["name"]},
         "warehouses": {"reyden": reyden, "baseline": baseline},
         "client": w, "results": [], "summary": None,
-        "lanes": {lane: {"current": None, "done": False, "ready": False, "error": None}
+        "lanes": {lane: {"inflight": {}, "run_wall_ms": [], "done": False,
+                         "ready": False, "error": None}
                   for lane in LANES},
         "barrier": threading.Barrier(len(LANES)),
     }
@@ -336,12 +355,12 @@ def race_state(race_id: str):
     now = time.time()
     lanes = {}
     for lane, st in race["lanes"].items():
-        cur = st["current"]
+        with RACES_LOCK:
+            cur = list(st["inflight"].values())
         lanes[lane] = {
             "ready": st["ready"], "done": st["done"], "error": st["error"],
-            "current": None if cur is None else {
-                **cur, "elapsed_ms": round((now - cur["started_at"]) * 1000, 1),
-            },
+            "inflight": [{**c, "elapsed_ms": round((now - c["started_at"]) * 1000, 1)}
+                         for c in cur],
         }
     with RACES_LOCK:
         results = list(race["results"])

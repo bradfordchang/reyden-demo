@@ -77,8 +77,9 @@ function render(snap, extrapolate = 0) {
   const results = snap.results;
   const inflight = {};
   for (const lane of ["reyden", "baseline"]) {
-    const cur = snap.lanes[lane].current;
-    if (cur) inflight[`${cur.scenario_id}|${lane}`] = cur.elapsed_ms + extrapolate;
+    for (const cur of snap.lanes[lane].inflight || []) {
+      inflight[`${cur.scenario_id}|${lane}`] = cur.elapsed_ms + extrapolate;
+    }
   }
 
   const ratios = [], totals = { reyden: 0, baseline: 0 };
@@ -145,7 +146,7 @@ function render(snap, extrapolate = 0) {
   const line = $("status-line");
   if (snap.status === "running") {
     const ready = Object.values(snap.lanes).every((l) => l.ready);
-    line.textContent = ready ? "Racing — identical queries in flight on both warehouses…" : "Warming up both warehouses (excluded from timings)…";
+    line.textContent = ready ? `Racing — all ${snap.scenario_ids.length} dataset queries in flight at once on both warehouses…` : "Warming up both warehouses (excluded from timings)…";
     line.className = ready ? "status-line" : "status-line warming";
   }
 
@@ -158,7 +159,10 @@ function render(snap, extrapolate = 0) {
     banner.innerHTML = s.geomean_speedup
       ? `🏁 <b>${esc(rey.name)} ran “${esc(snap.dashboard.name)}” ${s.geomean_speedup.toFixed(1)}× faster</b> —
          winning ${s.reyden_wins} of ${s.scenario_count} datasets (range ${s.min_speedup.toFixed(1)}×–${s.max_speedup.toFixed(1)}×),
-         on a <b>${esc(rey.size || "?")}</b> Reyden vs the dashboard's <b>${esc(base.size || "?")}</b> ${esc(base.name)}.`
+         on a <b>${esc(rey.size || "?")}</b> Reyden vs the dashboard's <b>${esc(base.size || "?")}</b> ${esc(base.name)}.` +
+        (s.load_ms && s.load_ms.reyden && s.load_ms.baseline
+          ? ` Full dashboard load, all queries at once: <b>${fmtS(s.load_ms.reyden)}</b> vs <b>${fmtS(s.load_ms.baseline)}</b>.`
+          : "")
       : "Race complete.";
     line.textContent = "Race complete — run it again or pick another dashboard.";
     line.className = "status-line";

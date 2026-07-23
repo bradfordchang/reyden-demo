@@ -14,7 +14,7 @@
   <div class="badge">DATABRICKS APP · LIVE DEMO</div>
   <h1>The <span class="rey">Reyden</span> Query Race</h1>
   <p class="sub">
-    Pick any AI/BI dashboard you can access. Its dataset queries run cache-busted,
+    Pick any AI/BI dashboard you can access. All its dataset queries fire at once, cache-busted,
     head-to-head — a Reyden warehouse vs the dashboard's own warehouse — live.
   </p>
   <p class="links" id="dash-links"></p>
@@ -75,7 +75,7 @@
   <footer class="method card">
     <b>Methodology.</b> Scenario SQL is pulled live from the selected dashboard's Lakeview
     datasets with default parameter values applied — the same queries the dashboard runs to
-    hydrate its widgets. Every statement carries a unique tag to defeat result caches and runs
+    hydrate its widgets. All of a run's queries fire concurrently — the same burst a dashboard sends when it loads. Every statement carries a unique tag to defeat result caches and runs
     through the SQL Statement Execution API on your identity (on-behalf-of authorization);
     bars show wall-clock time to results-ready, medians across runs. Both lanes warm up
     before the start gun so cold starts never skew a lap.
