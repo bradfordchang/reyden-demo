@@ -1,12 +1,8 @@
 /* Reyden Batch Profiler — frontend */
 "use strict";
 
-const $ = (id) => document.getElementById(id);
-const fmtMs = (ms) => ms == null ? "–" : ms >= 10000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms).toLocaleString() + "ms";
-const fmtS = (ms) => ms == null ? "–" : (ms / 1000).toFixed(1) + "s";
-const geomean = (a) => Math.exp(a.reduce((t, x) => t + Math.log(x), 0) / a.length);
-const esc = (s) => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; };
-const escAttr = (s) => esc(s).replace(/"/g, "&quot;");
+// $ / fmtMs / esc / getJSON / prefs helpers come from shared.js;
+// errClass / errMsg / ERROR_HINTS / explainError come from errors.js.
 
 const LANES = ["reyden", "baseline"];
 
@@ -23,25 +19,9 @@ const state = {
   pollFails: 0,
 };
 
-async function getJSON(url, opts) {
-  const r = await fetch(url, opts);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-  return r.json();
-}
-
-// Saved picks (selection, warehouse, runs) survive reloads; the key is shared
-// with the race page. Storage can be unavailable — fail silently.
-const STORE_KEY = "reyden-lab:v1";
-const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; } };
-const savePrefs = (patch) => { try { localStorage.setItem(STORE_KEY, JSON.stringify({ ...loadPrefs(), ...patch })); } catch { /* no-op */ } };
 const persistPicks = () => savePrefs({ selected: [...state.selected], reyId: state.reyId, runs: state.runs });
 
 /* ---------- selection picker ---------- */
-
-function whMeta(wh, suffix) {
-  if (!wh) return null;
-  return [wh.size, wh.serverless ? "serverless" : null, suffix].filter(Boolean).join(" · ");
-}
 
 function filteredDashboards() {
   const q = state.filter.trim().toLowerCase();

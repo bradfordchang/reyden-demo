@@ -1,13 +1,8 @@
 /* Reyden Query Race — frontend */
 "use strict";
 
-const $ = (id) => document.getElementById(id);
-const fmtMs = (ms) => ms == null ? "–" : ms >= 10000 ? (ms / 1000).toFixed(1) + "s" : Math.round(ms).toLocaleString() + "ms";
-const fmtS = (ms) => ms == null ? "–" : (ms / 1000).toFixed(1) + "s";
-const median = (a) => { const s = [...a].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
-const geomean = (a) => Math.exp(a.reduce((t, x) => t + Math.log(x), 0) / a.length);
-const esc = (s) => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; };
-// errClass / errMsg / ERROR_HINTS / explainError come from errors.js (shared with app.js).
+// $ / fmtMs / median / esc / getJSON / prefs helpers come from shared.js;
+// errClass / errMsg / ERROR_HINTS / explainError come from errors.js.
 
 const state = {
   dashboards: [], detail: null,       // detail: /api/dashboards/{id} response
@@ -19,24 +14,7 @@ const state = {
 
 const scenarios = () => (state.detail ? state.detail.scenarios : []);
 
-async function getJSON(url, opts) {
-  const r = await fetch(url, opts);
-  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-  return r.json();
-}
-
-// Warehouse pick is shared with the batch-profiler page via one storage key.
-// Storage can be unavailable — fail silently.
-const STORE_KEY = "reyden-lab:v1";
-const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; } };
-const savePrefs = (patch) => { try { localStorage.setItem(STORE_KEY, JSON.stringify({ ...loadPrefs(), ...patch })); } catch { /* no-op */ } };
-
 /* ---------- rendering ---------- */
-
-function whMeta(wh, suffix) {
-  if (!wh) return null;
-  return [wh.size, wh.serverless ? "serverless" : null, suffix].filter(Boolean).join(" · ");
-}
 
 function updateContenders() {
   const rey = state.reyden.find((w) => w.id === state.reyId);
@@ -325,9 +303,17 @@ async function pickDashboard(id) {
 }
 
 async function init() {
-  $("runs-dec").onclick = () => { state.runs = Math.max(1, state.runs - 1); $("runs-val").textContent = state.runs; };
-  $("runs-inc").onclick = () => { state.runs = Math.min(3, state.runs + 1); $("runs-val").textContent = state.runs; };
+  $("runs-dec").onclick = () => { state.runs = Math.max(1, state.runs - 1); $("runs-val").textContent = state.runs; savePrefs({ runs: state.runs }); };
+  $("runs-inc").onclick = () => { state.runs = Math.min(3, state.runs + 1); $("runs-val").textContent = state.runs; savePrefs({ runs: state.runs }); };
   $("go").onclick = startRace;
+
+  // Restore last visit's picks from the key shared with the batch-profiler
+  // page; anything stale falls back silently to the defaults.
+  const saved = loadPrefs();
+  if (Number.isFinite(saved.runs)) {
+    state.runs = Math.min(3, Math.max(1, Math.round(saved.runs)));
+    $("runs-val").textContent = state.runs;
+  }
 
   // Load the two dropdowns independently so one failure doesn't blank the other.
   const [dl, wl] = await Promise.allSettled([getJSON("/api/dashboards"), getJSON("/api/warehouses")]);
@@ -348,7 +334,6 @@ async function init() {
     if (!state.reyden.length) rs.appendChild(new Option("no Reyden warehouses available", ""));
     for (const w of state.reyden) rs.appendChild(new Option(`${w.name} (${w.size || "?"})`, w.id));
     state.reyId = state.reyden.length ? state.reyden[0].id : null;
-    const saved = loadPrefs();
     if (saved.reyId && state.reyden.some((w) => w.id === saved.reyId)) {
       state.reyId = saved.reyId;
       rs.value = saved.reyId;
