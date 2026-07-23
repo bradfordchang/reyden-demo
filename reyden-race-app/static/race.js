@@ -230,13 +230,17 @@ async function poll() {
     state.lastSnap = snap;
     state.lastSnapAt = performance.now();
     render(snap);
-    if (snap.status === "done" || snap.status === "failed") stopRace(false);
+    if (snap.status === "done" || snap.status === "failed") {
+      savePrefs({ raceId: null }); // terminal — nothing to reattach to
+      stopRace(false);
+    }
   } catch (e) {
     // Transient blips are fine, but a gone race (app restarted, race
     // evicted) would otherwise leave the controls locked forever.
     if (/No such race/i.test(e.message) || ++state.pollFails >= 8) {
       $("status-line").textContent = `Lost contact with the race (${e.message}) — reload the page to start over.`;
       freezeBars();
+      savePrefs({ raceId: null }); // race is gone — don't try to reattach
       stopRace();
     }
   }
@@ -285,6 +289,7 @@ async function startRace() {
       }),
     });
     state.race = resp.race_id;
+    savePrefs({ raceId: state.race }); // survive a reload — init() reattaches
     state.pollFails = 0;
     state.poll = setInterval(poll, 500);
     if (!state.raf) animate();
@@ -292,6 +297,54 @@ async function startRace() {
     $("status-line").textContent = `Could not start: ${e.message}`;
     stopRace();
   }
+}
+
+/* ---------- reattach after a reload ---------- */
+
+// A race left running in this tab survives a reload: /api/race/active says
+// which race (if any) is live, so a stale saved id is cleared without ever
+// fetching a 404. The race snapshot carries scenario *ids* but no labels, so
+// the dashboard is re-read (same load path the race used) to rebuild the
+// track; the live bars then light up by scenario id. Returns true when
+// reattached; anything stale clears the pref and falls through to the picker.
+async function reattach() {
+  let raceId = null;
+  try { raceId = (await getJSON("/api/race/active")).race_id; } catch { /* no-op */ }
+  if (!raceId) { savePrefs({ raceId: null }); return false; } // saved race already ended
+  let snap = null;
+  try { snap = await getJSON(`/api/race/${raceId}`); } catch { /* just evicted */ }
+  if (!snap || snap.status !== "running") { savePrefs({ raceId: null }); return false; }
+  // Scenario labels only come from the dashboard, not the race snapshot.
+  try { state.detail = await getJSON(`/api/dashboards/${encodeURIComponent(snap.dashboard.id)}`); }
+  catch { return false; } // can't rebuild the track without labels — keep the slot, show the picker
+  // Dim any datasets the running race excluded so the track matches its start.
+  const racing = new Set(snap.scenario_ids);
+  state.excluded = new Set(scenarios().filter((sc) => !racing.has(sc.id)).map((sc) => sc.id));
+  $("dash-select").value = snap.dashboard.id;
+  const rey = snap.warehouses.reyden;
+  if (rey && state.reyden.some((w) => w.id === rey.id)) {
+    state.reyId = rey.id;
+    $("rey-select").value = rey.id;
+  }
+  state.runs = snap.runs;
+  $("runs-val").textContent = state.runs;
+  state.race = raceId;
+  savePrefs({ raceId });
+  $("dash-links").innerHTML = "";
+  const a = document.createElement("a");
+  a.href = state.detail.url; a.target = "_blank";
+  a.textContent = `${state.detail.name} ↗`;
+  $("dash-links").appendChild(a);
+  buildTrack();
+  updateContenders();  // contender names + Go state, then lock everything
+  setBusy(true);       // Start stays disabled while the race runs
+  state.pollFails = 0;
+  state.lastSnap = snap;
+  state.lastSnapAt = performance.now();
+  render(snap);        // paints live bars + KPIs and owns the status line
+  state.poll = setInterval(poll, 500);
+  if (!state.raf) animate();
+  return true;
 }
 
 /* ---------- init ---------- */
@@ -362,6 +415,10 @@ async function init() {
     }
     rs.onchange = () => { state.reyId = rs.value || null; savePrefs({ reyId: state.reyId }); updateContenders(); };
   } else rs.appendChild(new Option("failed to load warehouses", ""));
+
+  // A race that was still running when this tab last unloaded takes over the
+  // page; otherwise fall through to the normal picker status line.
+  if (await reattach()) return;
 
   $("status-line").textContent =
     wl.status === "rejected" ? `Warehouses: ${wl.reason.message}`

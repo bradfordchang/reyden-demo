@@ -900,6 +900,21 @@ def start_race(req: RaceRequest, request: Request):
     return {"race_id": race["id"], "scenario_ids": race["scenario_ids"], "runs": race["runs"]}
 
 
+@app.get("/api/race/active")
+def active_race():
+    """Id of the race currently running, or null.
+
+    Lets the race page reattach to a live race it has no saved id for (e.g.
+    after a reload). Registered before /api/race/{race_id} so the literal
+    path wins (mirrors /api/profile/active).
+    """
+    with STATE_LOCK:
+        for r in RACES.values():
+            if r["status"] == "running":
+                return {"race_id": r["id"]}
+    return {"race_id": None}
+
+
 @app.get("/api/race/{race_id}")
 def race_state(race_id: str):
     race = RACES.get(race_id)
