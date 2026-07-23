@@ -155,8 +155,28 @@ function buildTrack(picked) {
   track.hidden = false;
 }
 
-// Details panel: validation-blocked datasets + per-query race failures, with
-// the same error-class chips and explanations the Single Race page shows.
+// Per-dataset medians table, shown for every finished dashboard. These are
+// per-query times (they include queueing on a saturated warehouse), so their
+// ratios can exceed the end-to-end load verdict — the note keeps that honest.
+function datasetTable(d, labelOf) {
+  const per = (d.summary && d.summary.per_scenario) || [];
+  if (d.status !== "done" || !per.length) return "";
+  const rows = per.map((e) => {
+    const sp = e.speedup == null ? `<span class="na">–</span>`
+      : `<span class="${e.speedup >= 1 ? "up" : "down"}">${e.speedup.toFixed(2)}×</span>`;
+    return `<tr><td>${esc(labelOf(e.scenario_id))}</td>` +
+      `<td>${fmtMs(e.reyden_ms)}</td><td>${fmtMs(e.baseline_ms)}</td><td>${sp}</td></tr>`;
+  }).join("");
+  return `<div class="ds-head">per-dataset medians</div>
+    <div class="ds-note">individual queries queue on a saturated warehouse, so these ratios can exceed the end-to-end load verdict above.</div>
+    <div class="ds-scroll"><table class="ds-table">
+      <thead><tr><th>dataset</th><th>REY</th><th>BASE</th><th>speedup</th></tr></thead>
+      <tbody>${rows}</tbody></table></div>`;
+}
+
+// Details panel: validation-blocked datasets + per-query race failures (with
+// the same error-class chips and explanations the Single Race page shows),
+// then the per-dataset results table for finished dashboards.
 function dashIssues(d) {
   const blocked = (d.datasets || []).filter((x) => x.error);
   const byScenario = {};
@@ -184,6 +204,7 @@ function dashIssues(d) {
           `<div class="err-why">${esc(explainError(lanes.reyden, lanes.baseline))}</div></div>`;
       }).join("");
   }
+  html += datasetTable(d, labelOf);
   return { html, count: blocked.length + failed.length };
 }
 
@@ -272,15 +293,18 @@ function render(snap, extrapolate = 0) {
       }
     }
 
-    // expandable per-dataset error details
+    // expandable details: issues (if any) + the per-dataset results table
     const btn = $(`dt-${i}`), det = $(`det-${i}`);
     if (btn && det) {
       const { html, count } = dashIssues(d);
-      if (count) {
+      if (html) {
         if (det.dataset.sig !== html) { det.innerHTML = html; det.dataset.sig = html; }
         const open = state.expanded.has(d.id);
         btn.hidden = false;
-        btn.textContent = open ? "hide details ▴" : `details (${count}) ▾`;
+        btn.textContent = open ? "hide details ▴"
+          : count ? `details — ${count} issue${count === 1 ? "" : "s"} ▾` : "details ▾";
+        btn.classList.toggle("issues", count > 0);
+        det.classList.toggle("has-issues", count > 0);
         det.hidden = !open;
       } else { btn.hidden = true; det.hidden = true; }
     }
