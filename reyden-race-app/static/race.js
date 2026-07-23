@@ -8,6 +8,23 @@ const median = (a) => { const s = [...a].sort((x, y) => x - y); const m = s.leng
 const geomean = (a) => Math.exp(a.reduce((t, x) => t + Math.log(x), 0) / a.length);
 const esc = (s) => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; };
 
+// SQL errors carry their error class inline, e.g. "[DIVIDE_BY_ZERO] Division by zero…".
+const errClass = (msg) => ((msg || "").match(/^\s*\[([A-Z0-9_.]+)\]/) || [])[1] || null;
+
+const ERROR_HINTS = {
+  DIVIDE_BY_ZERO: "The query divides by a value that is 0 for some row — engines differ in ANSI strictness, so one may raise an error where the other returns NULL. Portable fix in the dashboard SQL: try_divide() or NULLIF().",
+  INVALID_EXTRACT_BASE_FIELD_TYPE: "This dataset uses a dashboard parameter in a form the race can't emulate yet (e.g. a date-range parameter read as :param.min/:param.max), so the substituted SQL is invalid. This is a race-harness limitation, not a warehouse problem.",
+};
+
+function explainError(reyErr, baseErr) {
+  const parts = [];
+  if (reyErr && baseErr) parts.push("Both lanes failed, so the cause is in the query or its parameters rather than an engine difference.");
+  else parts.push(`Only the ${reyErr ? "Reyden" : "baseline"} lane failed — the two engines treat this SQL differently.`);
+  const cls = errClass((reyErr || baseErr).error);
+  if (cls && ERROR_HINTS[cls]) parts.push(ERROR_HINTS[cls]);
+  return parts.join(" ");
+}
+
 const state = {
   dashboards: [], detail: null,       // detail: /api/dashboards/{id} response
   reyden: [], reyId: null,
@@ -64,7 +81,8 @@ function buildTrack() {
           <div class="bar-wrap"><div class="bar" id="bar-${i}-baseline"></div></div>
           <span class="ms" id="ms-${i}-baseline">–</span></div>
       </div>
-      <div class="verdict" id="v-${i}"></div>`;
+      <div class="verdict" id="v-${i}"></div>
+      <div class="err-detail" id="err-${i}" hidden></div>`;
     track.appendChild(row);
   });
 }
@@ -125,6 +143,22 @@ function render(snap, extrapolate = 0) {
         ms.className = "ms err";
         ms.title = err.error;
       }
+    }
+
+    const errRow = $(`err-${i}`);
+    if (errRow) {
+      const reyErr = results.find((r) => r.scenario_id === sc.id && r.lane === "reyden" && r.error);
+      const baseErr = results.find((r) => r.scenario_id === sc.id && r.lane === "baseline" && r.error);
+      if (reyErr || baseErr) {
+        const lines = [["REY", reyErr], ["BASE", baseErr]].filter(([, e]) => e).map(([who, e]) => {
+          const cls = errClass(e.error) || e.error_code;
+          const msg = e.error.replace(/^\s*\[[A-Z0-9_.]+\]\s*/, "");
+          return `<div class="err-line"><span class="who">${who}</span>${cls ? `<code>${esc(cls)}</code>` : ""}<span>${esc(msg)}</span></div>`;
+        }).join("");
+        const html = lines + `<div class="err-why">${esc(explainError(reyErr, baseErr))}</div>`;
+        if (errRow.dataset.sig !== html) { errRow.innerHTML = html; errRow.dataset.sig = html; }
+        errRow.hidden = false;
+      } else errRow.hidden = true;
     }
 
     const v = $(`v-${i}`);

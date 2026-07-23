@@ -187,6 +187,19 @@ main { max-width: 1060px; margin: 26px auto 60px; padding: 0 24px; display: grid
 .verdict .flash { color: var(--win); }
 .verdict small { display: block; font-weight: 600; font-size: 0.62rem; color: var(--muted); letter-spacing: 0.08em; }
 .row.winner-rey { border-color: rgba(255, 122, 61, 0.45); }
+.err-detail {
+  grid-column: 1 / -1; display: grid; gap: 5px;
+  border-top: 1px dashed rgba(255, 107, 107, 0.25); padding-top: 9px; margin-top: 3px;
+  font-size: 0.75rem; line-height: 1.5; color: var(--muted);
+}
+.err-line { display: flex; gap: 8px; align-items: baseline; }
+.err-line .who { font-size: 0.62rem; font-weight: 800; letter-spacing: 0.06em; color: #ff6b6b; flex: none; }
+.err-line code {
+  font-family: inherit; font-size: 0.68rem; font-weight: 700; color: #ff9b9b; white-space: nowrap;
+  background: rgba(255, 107, 107, 0.08); border: 1px solid rgba(255, 107, 107, 0.22);
+  border-radius: 5px; padding: 1px 6px; flex: none;
+}
+.err-why { color: var(--text); opacity: 0.75; }
 
 /* ---------- batch rows ---------- */
 .dash-label { display: flex; align-items: flex-start; gap: 10px; }

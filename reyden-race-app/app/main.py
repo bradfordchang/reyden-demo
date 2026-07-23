@@ -236,12 +236,15 @@ def execute_timed(w: WorkspaceClient, warehouse_id: str, sql: str) -> dict:
     resp = _run_statement(w, warehouse_id, stmt)
     wall_ms = (time.perf_counter() - t0) * 1000
     state = resp.status.state if resp.status else None
-    error = None
+    error = error_code = None
     if state != StatementState.SUCCEEDED:
-        error = (resp.status.error.message if resp.status and resp.status.error else str(state))[:300]
+        err = resp.status.error if resp.status else None
+        error = ((err.message if err else None) or str(state))[:300]
+        code = err.error_code if err else None
+        error_code = getattr(code, "value", None) or (str(code) if code else None)
     rows = resp.manifest.total_row_count if resp.manifest else None
     return {"wall_ms": round(wall_ms, 1), "rows": rows, "error": error,
-            "statement_id": resp.statement_id}
+            "error_code": error_code, "statement_id": resp.statement_id}
 
 
 # The Reyden preview engine cannot serialize metadata result sets (DESCRIBE
