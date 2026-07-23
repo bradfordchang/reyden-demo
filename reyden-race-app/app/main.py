@@ -505,7 +505,8 @@ def _lane_worker(profile: dict, dash: dict, lane: str):
     scenarios = dash["scenarios"]
     runs = profile["runs"]
 
-    def one_query(sc: dict, run: int):
+    def one_query(sc: dict, run: int) -> bool:
+        """Run one dataset query; returns True if it errored on this lane."""
         with STATE_LOCK:
             st["inflight"][sc["id"]] = {"scenario_id": sc["id"], "run": run,
                                         "started_at": time.time()}
@@ -516,6 +517,7 @@ def _lane_worker(profile: dict, dash: dict, lane: str):
                 st["inflight"].pop(sc["id"], None)
         with STATE_LOCK:
             dash["results"].append({"lane": lane, "scenario_id": sc["id"], "run": run, **r})
+        return r["error"] is not None
 
     try:
         # Warm-up (spins the warehouse up; excluded from results)
@@ -529,9 +531,11 @@ def _lane_worker(profile: dict, dash: dict, lane: str):
                                 thread_name_prefix=f"race-{lane}") as pool:
             for run in range(1, runs + 1):
                 t0 = time.perf_counter()
-                for f in [pool.submit(one_query, sc, run) for sc in scenarios]:
-                    f.result()
-                st["run_wall_ms"].append(round((time.perf_counter() - t0) * 1000, 1))
+                errs = [f.result() for f in
+                        [pool.submit(one_query, sc, run) for sc in scenarios]]
+                wall = round((time.perf_counter() - t0) * 1000, 1)
+                if not any(errs):  # a load wall only counts if every query was clean
+                    st["run_wall_ms"].append(wall)
     except Exception as e:  # surface lane-level failures to the UI
         st["error"] = (str(e) or type(e).__name__)[:300]
         dash["barrier"].abort()  # free the peer lane instead of a 300s wait
@@ -641,9 +645,13 @@ def _batch_worker(profile: dict):
             dash["status"] = "profiling"
             _run_dashboard(profile, dash)
             lane_errors = [st["error"] for st in dash["lanes"].values() if st["error"]]
-            if lane_errors and not any(not r["error"] for r in dash["results"]):
+            # No successful query means there's no honest verdict to show —
+            # mark it failed even when no lane-level exception was raised (every
+            # dataset can error at the SQL level and still "complete").
+            if not any(not r["error"] for r in dash["results"]):
                 dash["status"] = "error"
-                dash["reason"] = lane_errors[0]
+                dash["reason"] = (lane_errors[0] if lane_errors
+                                  else "all dataset queries failed")
             else:
                 dash["status"] = "done"
         profile["summary"] = _overall(profile)
