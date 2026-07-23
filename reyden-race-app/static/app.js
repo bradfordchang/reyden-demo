@@ -85,26 +85,36 @@ function render(snap, extrapolate = 0) {
   const ratios = [], totals = { reyden: 0, baseline: 0 };
   let wins = 0, pairs = 0;
 
-  scenarios().forEach((sc, i) => {
+  // All rows share one scale so bar lengths are comparable across datasets;
+  // it tracks the longest time seen (including in-flight), so every bar
+  // rescales as the leader grows.
+  const rows = scenarios().map((sc) => {
     const rey = laneTimes(results, sc.id, "reyden");
     const base = laneTimes(results, sc.id, "baseline");
-    const reyMed = rey.length ? median(rey) : null;
-    const baseMed = base.length ? median(base) : null;
-    const reyLive = inflight[`${sc.id}|reyden`];
-    const baseLive = inflight[`${sc.id}|baseline`];
-    const rowMax = Math.max(reyMed || 0, baseMed || 0, reyLive || 0, baseLive || 0, 1);
+    return {
+      rey, base,
+      reyMed: rey.length ? median(rey) : null,
+      baseMed: base.length ? median(base) : null,
+      reyLive: inflight[`${sc.id}|reyden`],
+      baseLive: inflight[`${sc.id}|baseline`],
+    };
+  });
+  const trackMax = Math.max(1, ...rows.flatMap((r) => [r.reyMed || 0, r.baseMed || 0, r.reyLive || 0, r.baseLive || 0]));
+
+  scenarios().forEach((sc, i) => {
+    const { rey, base, reyMed, baseMed, reyLive, baseLive } = rows[i];
 
     for (const [lane, med, live] of [["reyden", reyMed, reyLive], ["baseline", baseMed, baseLive]]) {
       const bar = $(`bar-${i}-${lane}`), ms = $(`ms-${i}-${lane}`);
       if (!bar) continue;
       const err = results.find((r) => r.scenario_id === sc.id && r.lane === lane && r.error);
       if (live != null) {
-        bar.style.width = `${Math.min(98, (live / rowMax) * 100)}%`;
+        bar.style.width = `${Math.min(98, (live / trackMax) * 100)}%`;
         bar.classList.add("running");
         ms.textContent = fmtMs(live);
         ms.className = "ms live";
       } else if (med != null) {
-        bar.style.width = `${(med / rowMax) * 100}%`;
+        bar.style.width = `${(med / trackMax) * 100}%`;
         bar.classList.remove("running");
         ms.textContent = fmtMs(med);
         ms.className = "ms";
