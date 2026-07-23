@@ -21,6 +21,22 @@ const state = {
 
 const persistPicks = () => savePrefs({ selected: [...state.selected], reyId: state.reyId, runs: state.runs });
 
+// Adopt a dashboard list (cached or live) and set the selection the same way
+// each time: restore last visit's picks intersected with what's actually
+// present, else select all when the whole list fits in one batch, else none.
+// Called for the instant cache paint and again to reconcile with live data.
+function applyDashboards(list, saved) {
+  state.dashboards = list;
+  const known = new Set(list.map((d) => d.id));
+  if (Array.isArray(saved.selected)) {
+    state.selected = new Set(saved.selected.filter((id) => known.has(id)));
+  } else if (list.length <= state.maxBatch) {
+    state.selected = new Set(list.map((d) => d.id));
+  } else {
+    state.selected = new Set();
+  }
+}
+
 /* ---------- selection picker ---------- */
 
 function filteredDashboards() {
@@ -522,17 +538,38 @@ async function init() {
     renderPicker();
   };
 
+  // Restore last visit's picks up front; anything stale falls back silently to
+  // the defaults below (stale dashboard ids dropped, unknown warehouse ignored).
+  const saved = loadPrefs();
+
+  // Instant paint: fill the picker from the last visit's slim dashboard cache
+  // before the live fetch resolves, closing the "Loading…" gap. Skipped when a
+  // saved batch is likely to reattach (so the picker never flashes ahead of the
+  // track). Live data always wins in the reconcile below; a cache miss or parse
+  // failure leaves saved.dashboards undefined, so this is a no-op then.
+  const cached = Array.isArray(saved.dashboards) ? saved.dashboards : null;
+  if (cached && cached.length && !saved.profileId) {
+    applyDashboards(cached, saved);
+    showPicker();
+  }
+
   // Load the two lists independently so one failure doesn't blank the other.
   const [dl, wl] = await Promise.allSettled([getJSON("/api/dashboards"), getJSON("/api/warehouses")]);
 
   if (dl.status === "fulfilled") {
-    state.dashboards = dl.value.dashboards;
     state.maxBatch = dl.value.max_batch || state.maxBatch;
-    // Sensible default: everything when it fits in one batch, else start
-    // empty and let the filter + "select all shown" do the picking.
-    if (state.dashboards.length <= state.maxBatch) {
-      state.dashboards.forEach((d) => state.selected.add(d.id));
-    }
+    // Reconcile: live data replaces any cache paint, re-running the same
+    // stale-id intersection / select-all default the cache used.
+    applyDashboards(dl.value.dashboards, saved);
+    // Cache a slim copy — only the fields renderPicker paints — for next
+    // visit's instant paint. Server-provided values; renderPicker esc()s them.
+    savePrefs({ dashboards: state.dashboards.map((d) => ({
+      id: d.id, name: d.name, warehouse_name: d.warehouse_name,
+      warehouse_size: d.warehouse_size, updated: d.updated })) });
+  } else {
+    // Live fetch failed: drop any cache paint so the error path matches today.
+    state.dashboards = [];
+    state.selected = new Set();
   }
 
   const rs = $("rey-select");
@@ -545,14 +582,9 @@ async function init() {
     rs.onchange = () => { state.reyId = rs.value || null; persistPicks(); updateSelection(); };
   } else rs.appendChild(new Option("failed to load warehouses", ""));
 
-  // Restore last visit's picks; anything stale falls back silently to the
-  // defaults above (stale dashboard ids dropped, unknown warehouse ignored).
-  const saved = loadPrefs();
+  // Selection was already restored by applyDashboards above; here we finish
+  // restoring the warehouse and run count (both need the live lists).
   const restoredSel = dl.status === "fulfilled" && Array.isArray(saved.selected);
-  if (restoredSel) {
-    const known = new Set(state.dashboards.map((d) => d.id));
-    state.selected = new Set(saved.selected.filter((id) => known.has(id)));
-  }
   if (saved.reyId && state.reyden.some((w) => w.id === saved.reyId)) {
     state.reyId = saved.reyId;
     rs.value = saved.reyId;

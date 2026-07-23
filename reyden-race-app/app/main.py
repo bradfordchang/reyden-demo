@@ -41,6 +41,7 @@ the user token starts working and the fallback goes dormant.
 Locally there is no forwarded token, so the default SDK auth chain is used
 (DATABRICKS_CONFIG_PROFILE) — you are both the user and the "SP".
 """
+import hashlib
 import json
 import os
 import re
@@ -124,6 +125,23 @@ def _get(w: WorkspaceClient, path: str, **query) -> dict:
                            query={k: v for k, v in query.items() if v is not None}) or {}
 
 
+# Per-user-token memo of tokens already proven to lack the Lakeview scope, so
+# a scope-less token skips its guaranteed-failing user attempt and goes
+# straight to the SP. Entries are short, non-reversible fingerprints (never the
+# token itself). Deliberately PER-TOKEN, not global: this preserves the
+# self-disabling behavior — once an account admin adds the scope and the user
+# re-logs-in, they get a NEW token whose fingerprint isn't here, so it
+# re-probes and (now succeeding) never falls back again. Capped so a long-lived
+# process can't grow it without bound.
+_SCOPELESS_TOKENS: set[str] = set()
+_SCOPELESS_CAP = 500
+
+
+def _token_fp(token: str) -> str:
+    """Short, non-reversible fingerprint of a user token for the scope memo."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
 def _lakeview_get(w: WorkspaceClient, path: str, **query) -> dict:
     """Lakeview REST as the user, falling back to the app SP.
 
@@ -134,13 +152,33 @@ def _lakeview_get(w: WorkspaceClient, path: str, **query) -> dict:
     the user-token call succeeds and this fallback stops triggering.
     Scope-error text varies: "Invalid scope, required scopes: dashboards" /
     "Provided OAuth token does not have required scopes: dashboards".
+
+    A user token that has already demonstrated it lacks the scope is memoized
+    (by fingerprint) and thereafter skips straight to the SP — saving one
+    guaranteed-failing round-trip per Lakeview call. The memo only decides
+    whether to *attempt* the user token; the SP fallback and every permission
+    check are unchanged, and any non-scope error still propagates untouched
+    (and is not memoized). Locally there is one client (the SP) and no
+    forwarded token, so the memo path is skipped entirely — behavior is
+    identical to a plain user-then-SP try.
     """
+    sp = _sp_client()
+    # Only a distinct user client carrying a token participates in the memo.
+    token = None if w is sp else getattr(w.config, "token", None)
+    fp = _token_fp(token) if token else None
+
+    if fp is not None and fp in _SCOPELESS_TOKENS:
+        return _get(sp, path, **query)
+
     try:
         return _get(w, path, **query)
     except Exception as e:
         msg = str(e)
-        sp = _sp_client()
         if w is not sp and "scope" in msg.lower() and "dashboards" in msg:
+            if fp is not None:
+                if len(_SCOPELESS_TOKENS) >= _SCOPELESS_CAP:
+                    _SCOPELESS_TOKENS.clear()
+                _SCOPELESS_TOKENS.add(fp)
             return _get(sp, path, **query)
         raise
 
