@@ -257,13 +257,17 @@ def load_dashboard(w: WorkspaceClient, dashboard_id: str) -> tuple[dict, list[di
     return meta, scenarios
 
 
-def _reyden_warehouse_ids(w: WorkspaceClient) -> set[str]:
-    """Ids of the Reyden warehouses visible to the user (empty on failure)."""
+def _warehouse_catalog(w: WorkspaceClient) -> tuple[set[str], dict[str, dict]]:
+    """One warehouses fetch, two views (both empty on failure): the ids of the
+    Reyden warehouses visible to the user, and an id -> {name, size} map of
+    every visible warehouse for display."""
     try:
         all_wh = _get(w, "/api/2.0/sql/warehouses").get("warehouses", [])
     except Exception:
-        return set()
-    return {x["id"] for x in all_wh if x.get("warehouse_type") == "REYDEN"}
+        return set(), {}
+    return ({x["id"] for x in all_wh if x.get("warehouse_type") == "REYDEN"},
+            {x["id"]: {"name": x.get("name"), "size": x.get("cluster_size")}
+             for x in all_wh if x.get("id")})
 
 
 def _list_dashboards(w: WorkspaceClient) -> list[dict]:
@@ -271,18 +275,23 @@ def _list_dashboards(w: WorkspaceClient) -> list[dict]:
 
     Dashboards configured to run *on* a Reyden warehouse are excluded: their
     baseline lane would be the Reyden warehouse itself, so a race against it
-    is meaningless.
+    is meaningless. Each item carries the baseline warehouse's name/size so
+    the pickers can show what the dashboard would race against (null when the
+    warehouse is not visible to the user).
     """
-    reyden_ids = _reyden_warehouse_ids(w)
+    reyden_ids, wh_by_id = _warehouse_catalog(w)
     items, page_token = [], None
     while len(items) < 1000:
         page = _lakeview_get(w, "/api/2.0/lakeview/dashboards", page_size=100, page_token=page_token)
         for d in page.get("dashboards", []):
             if (d.get("lifecycle_state") == "ACTIVE" and d.get("warehouse_id")
                     and d["warehouse_id"] not in reyden_ids):
+                wh = wh_by_id.get(d["warehouse_id"], {})
                 items.append({"id": d["dashboard_id"],
                               "name": d.get("display_name") or d["dashboard_id"],
                               "warehouse_id": d["warehouse_id"],
+                              "warehouse_name": wh.get("name"),
+                              "warehouse_size": wh.get("size"),
                               "updated": d.get("update_time") or d.get("create_time")})
         page_token = page.get("next_page_token")
         if not page_token:

@@ -271,6 +271,10 @@ main { max-width: 1060px; margin: 26px auto 60px; padding: 0 24px; display: grid
 .pick-row:hover { background: rgba(255,255,255,0.04); }
 .pick-row input { accent-color: var(--rey); cursor: pointer; flex: none; }
 .pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-wh {
+  color: var(--muted); font-size: 0.7rem; flex: none; max-width: 38%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .pick-date { color: var(--muted); font-size: 0.7rem; flex: none; }
 .pick-empty { color: var(--muted); font-size: 0.82rem; padding: 12px; text-align: center; }
 .sel-all {

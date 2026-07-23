@@ -341,7 +341,11 @@ async function init() {
   if (dl.status === "fulfilled") {
     state.dashboards = dl.value.dashboards;
     ds.appendChild(new Option("— pick a dashboard —", ""));
-    for (const d of state.dashboards) ds.appendChild(new Option(d.name, d.id));
+    // Show the baseline warehouse each dashboard would race against, when
+    // it's visible to the user (new Option escapes the text itself).
+    for (const d of state.dashboards) {
+      ds.appendChild(new Option(d.warehouse_name ? `${d.name} — vs ${d.warehouse_name}` : d.name, d.id));
+    }
     ds.onchange = () => { if (ds.value) pickDashboard(ds.value); };
   } else ds.appendChild(new Option("failed to load dashboards", ""));
 

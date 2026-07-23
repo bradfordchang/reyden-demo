@@ -35,9 +35,14 @@ function renderPicker() {
   for (const d of shown) {
     const row = document.createElement("label");
     row.className = "pick-row";
+    // Baseline warehouse the dashboard would race against — omitted when the
+    // user can't see it (name comes back null).
+    const wh = d.warehouse_name
+      ? d.warehouse_name + (d.warehouse_size ? ` · ${d.warehouse_size}` : "") : "";
     row.innerHTML = `
       <input type="checkbox" ${state.selected.has(d.id) ? "checked" : ""}>
       <span class="pick-name">${esc(d.name)}</span>
+      ${wh ? `<span class="pick-wh" title="${escAttr(wh)}">${esc(wh)}</span>` : ""}
       <span class="pick-date">${d.updated ? new Date(d.updated).toLocaleDateString() : ""}</span>`;
     row.querySelector("input").onchange = (e) => {
       if (e.target.checked) state.selected.add(d.id); else state.selected.delete(d.id);
