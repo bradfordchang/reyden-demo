@@ -2,7 +2,7 @@
 
 Tools for demonstrating the query performance of [Reyden](https://docs.databricks.com/aws/en/compute/sql-warehouse/real-time),
 the engine behind Databricks' real-time SQL warehouses (Lakehouse//RT), against
-a classic serverless SQL warehouse — using the queries of a real AI/BI dashboard
+a serverless SQL Warehouse — using the queries of a real AI/BI dashboard
 rather than synthetic benchmarks.
 
 ## What's here
