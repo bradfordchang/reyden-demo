@@ -25,6 +25,12 @@ async function getJSON(url, opts) {
   return r.json();
 }
 
+// Warehouse pick is shared with the batch-profiler page via one storage key.
+// Storage can be unavailable — fail silently.
+const STORE_KEY = "reyden-lab:v1";
+const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; } };
+const savePrefs = (patch) => { try { localStorage.setItem(STORE_KEY, JSON.stringify({ ...loadPrefs(), ...patch })); } catch { /* no-op */ } };
+
 /* ---------- rendering ---------- */
 
 function whMeta(wh, suffix) {
@@ -342,7 +348,12 @@ async function init() {
     if (!state.reyden.length) rs.appendChild(new Option("no Reyden warehouses available", ""));
     for (const w of state.reyden) rs.appendChild(new Option(`${w.name} (${w.size || "?"})`, w.id));
     state.reyId = state.reyden.length ? state.reyden[0].id : null;
-    rs.onchange = () => { state.reyId = rs.value || null; updateContenders(); };
+    const saved = loadPrefs();
+    if (saved.reyId && state.reyden.some((w) => w.id === saved.reyId)) {
+      state.reyId = saved.reyId;
+      rs.value = saved.reyId;
+    }
+    rs.onchange = () => { state.reyId = rs.value || null; savePrefs({ reyId: state.reyId }); updateContenders(); };
   } else rs.appendChild(new Option("failed to load warehouses", ""));
 
   $("status-line").textContent =

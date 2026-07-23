@@ -29,6 +29,13 @@ async function getJSON(url, opts) {
   return r.json();
 }
 
+// Saved picks (selection, warehouse, runs) survive reloads; the key is shared
+// with the race page. Storage can be unavailable — fail silently.
+const STORE_KEY = "reyden-lab:v1";
+const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(STORE_KEY)) || {}; } catch { return {}; } };
+const savePrefs = (patch) => { try { localStorage.setItem(STORE_KEY, JSON.stringify({ ...loadPrefs(), ...patch })); } catch { /* no-op */ } };
+const persistPicks = () => savePrefs({ selected: [...state.selected], reyId: state.reyId, runs: state.runs });
+
 /* ---------- selection picker ---------- */
 
 function whMeta(wh, suffix) {
@@ -54,6 +61,7 @@ function renderPicker() {
       <span class="pick-date">${d.updated ? new Date(d.updated).toLocaleDateString() : ""}</span>`;
     row.querySelector("input").onchange = (e) => {
       if (e.target.checked) state.selected.add(d.id); else state.selected.delete(d.id);
+      persistPicks();
       updateSelection();
     };
     list.appendChild(row);
@@ -412,8 +420,8 @@ async function startProfile() {
 /* ---------- init ---------- */
 
 async function init() {
-  $("runs-dec").onclick = () => { state.runs = Math.max(1, state.runs - 1); $("runs-val").textContent = state.runs; };
-  $("runs-inc").onclick = () => { state.runs = Math.min(3, state.runs + 1); $("runs-val").textContent = state.runs; };
+  $("runs-dec").onclick = () => { state.runs = Math.max(1, state.runs - 1); $("runs-val").textContent = state.runs; persistPicks(); };
+  $("runs-inc").onclick = () => { state.runs = Math.min(3, state.runs + 1); $("runs-val").textContent = state.runs; persistPicks(); };
   $("go").onclick = startProfile;
   $("edit-sel").onclick = showPicker;
   $("dash-filter").oninput = () => { state.filter = $("dash-filter").value; renderPicker(); };
@@ -421,6 +429,7 @@ async function init() {
     const shown = filteredDashboards();
     if ($("sel-all").checked) shown.forEach((d) => state.selected.add(d.id));
     else shown.forEach((d) => state.selected.delete(d.id));
+    persistPicks();
     renderPicker();
   };
 
@@ -444,14 +453,33 @@ async function init() {
     if (!state.reyden.length) rs.appendChild(new Option("no Reyden warehouses available", ""));
     for (const w of state.reyden) rs.appendChild(new Option(`${w.name} (${w.size || "?"})`, w.id));
     state.reyId = state.reyden.length ? state.reyden[0].id : null;
-    rs.onchange = () => { state.reyId = rs.value || null; updateSelection(); };
+    rs.onchange = () => { state.reyId = rs.value || null; persistPicks(); updateSelection(); };
   } else rs.appendChild(new Option("failed to load warehouses", ""));
+
+  // Restore last visit's picks; anything stale falls back silently to the
+  // defaults above (stale dashboard ids dropped, unknown warehouse ignored).
+  const saved = loadPrefs();
+  const restoredSel = dl.status === "fulfilled" && Array.isArray(saved.selected);
+  if (restoredSel) {
+    const known = new Set(state.dashboards.map((d) => d.id));
+    state.selected = new Set(saved.selected.filter((id) => known.has(id)));
+  }
+  if (saved.reyId && state.reyden.some((w) => w.id === saved.reyId)) {
+    state.reyId = saved.reyId;
+    rs.value = saved.reyId;
+  }
+  if (Number.isFinite(saved.runs)) {
+    state.runs = Math.min(3, Math.max(1, Math.round(saved.runs)));
+    $("runs-val").textContent = state.runs;
+  }
 
   $("status-line").textContent =
     wl.status === "rejected" ? `Warehouses: ${wl.reason.message}`
     : dl.status === "rejected" ? `Dashboards: ${dl.reason.message}`
     : !state.reyden.length ? "No Reyden warehouses are visible to you — ask an admin for CAN USE on one."
     : !state.dashboards.length ? "No dashboards found — share a dashboard with the app's service principal, then reload."
+    : restoredSel
+      ? `${state.dashboards.length} dashboards${dl.value.user ? ` visible to ${dl.value.user}` : ""} — restored your last selection (${state.selected.size}).`
     : state.dashboards.length > state.maxBatch
       ? `${state.dashboards.length} dashboards${dl.value.user ? ` visible to ${dl.value.user}` : ""} — filter and pick up to ${state.maxBatch} to profile.`
       : `${state.dashboards.length} dashboards${dl.value.user ? ` visible to ${dl.value.user}` : ""} — all selected; deselect any you don't want.`;
