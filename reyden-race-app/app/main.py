@@ -587,11 +587,19 @@ def _snapshot(profile: dict) -> dict:
                                 "inflight": [{**c, "elapsed_ms": round((now - c["started_at"]) * 1000, 1)}
                                              for c in st["inflight"].values()]}
                          for lane, st in d["lanes"].items()}
+            seen, failures = set(), []  # failed queries, one per (scenario, lane)
+            for r in d.get("results") or []:
+                key = (r["scenario_id"], r["lane"])
+                if r["error"] and key not in seen and len(failures) < 40:
+                    seen.add(key)
+                    failures.append({"scenario_id": r["scenario_id"], "lane": r["lane"],
+                                     "error_code": r.get("error_code"), "error": r["error"]})
             dashboards.append({
                 "id": d["id"], "name": d["name"], "status": d["status"],
                 "reason": d.get("reason"),
                 "baseline": (d.get("warehouses") or {}).get("baseline"),
                 "datasets": d.get("dataset_checks"),
+                "failures": failures,
                 "scenario_ids": d.get("scenario_ids") or [],
                 "queries_done": len(d.get("results") or []),
                 "queries_total": len(d.get("scenario_ids") or []) * profile["runs"] * len(LANES),

@@ -200,6 +200,20 @@ main { max-width: 1060px; margin: 26px auto 60px; padding: 0 24px; display: grid
   border-radius: 5px; padding: 1px 6px; flex: none;
 }
 .err-why { color: var(--text); opacity: 0.75; }
+.err-head {
+  font-size: 0.6rem; font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase;
+  color: #ff9b9b; margin-top: 2px;
+}
+.err-group { display: grid; gap: 4px; }
+.err-detail .ds { font-weight: 700; color: var(--text); }
+.err-line .ds { flex: none; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.details-toggle {
+  display: inline-block; margin-top: 6px; background: none; color: var(--muted);
+  border: 1px solid rgba(255, 107, 107, 0.3); border-radius: 999px; cursor: pointer;
+  font: inherit; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;
+  text-transform: uppercase; padding: 3px 10px;
+}
+.details-toggle:hover { color: #ff9b9b; border-color: rgba(255, 107, 107, 0.5); }
 
 /* ---------- dashboard picker ---------- */
 .picker-card { padding: 14px 16px; display: grid; gap: 10px; }

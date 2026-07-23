@@ -16,6 +16,7 @@ const state = {
   selected: new Set(),       // dashboard ids picked for the next batch
   filter: "",
   rowById: {},               // dashboard id -> result-row index (current batch only)
+  expanded: new Set(),       // dashboard ids with the details panel open
   maxBatch: 25,
   runs: 1,
   profile: null, poll: null, raf: null, lastSnap: null, lastSnapAt: 0,
@@ -113,6 +114,7 @@ function buildTrack(picked) {
   const track = $("track");
   track.innerHTML = "";
   state.rowById = {};
+  state.expanded.clear();
   const h = document.createElement("div");
   h.className = "page-header";
   h.textContent = `this batch — ${picked.length} dashboard${picked.length === 1 ? "" : "s"}, validated first, then profiled`;
@@ -123,7 +125,8 @@ function buildTrack(picked) {
     row.className = "row dash-row";
     row.id = `row-${i}`;
     row.innerHTML = `
-      <div class="label">${esc(d.name)}<small id="meta-${i}"></small></div>
+      <div class="label">${esc(d.name)}<small id="meta-${i}"></small>
+        <button class="details-toggle" id="dt-${i}" hidden>details ▾</button></div>
       <div class="lanes">
         <div class="lane reyden"><span class="who">REY</span>
           <div class="bar-wrap"><div class="bar" id="bar-${i}-reyden"></div></div>
@@ -132,10 +135,47 @@ function buildTrack(picked) {
           <div class="bar-wrap"><div class="bar" id="bar-${i}-baseline"></div></div>
           <span class="ms" id="ms-${i}-baseline">–</span></div>
       </div>
-      <div class="verdict" id="v-${i}"><span class="chip">queued</span></div>`;
+      <div class="verdict" id="v-${i}"><span class="chip">queued</span></div>
+      <div class="err-detail" id="det-${i}" hidden></div>`;
+    row.querySelector(".details-toggle").onclick = () => {
+      if (state.expanded.has(d.id)) state.expanded.delete(d.id); else state.expanded.add(d.id);
+      if (state.lastSnap) render(state.lastSnap);
+    };
     track.appendChild(row);
   });
   track.hidden = false;
+}
+
+// Details panel: validation-blocked datasets + per-query race failures, with
+// the same error-class chips and explanations the Single Race page shows.
+function dashIssues(d) {
+  const blocked = (d.datasets || []).filter((x) => x.error);
+  const byScenario = {};
+  for (const f of d.failures || []) (byScenario[f.scenario_id] = byScenario[f.scenario_id] || {})[f.lane] = f;
+  const failed = Object.entries(byScenario);
+  const labelOf = (id) => (((d.datasets || []).find((x) => x.id === id) || {}).label) || id;
+  let html = "";
+  if (blocked.length) {
+    html += `<div class="err-head">blocked in validation — never profiled</div>` +
+      blocked.map((x) => {
+        const cls = errClass(x.error);
+        return `<div class="err-line"><span class="ds">${esc(x.label)}</span>` +
+          (cls ? `<code>${esc(cls)}</code>` : "") + `<span>${esc(errMsg(x.error))}</span></div>`;
+      }).join("");
+  }
+  if (failed.length) {
+    html += `<div class="err-head">failed while profiling</div>` +
+      failed.map(([scId, lanes]) => {
+        const lines = [["REY", lanes.reyden], ["BASE", lanes.baseline]].filter(([, e]) => e).map(([who, e]) => {
+          const cls = errClass(e.error) || e.error_code;
+          return `<div class="err-line"><span class="who">${who}</span>` +
+            (cls ? `<code>${esc(cls)}</code>` : "") + `<span>${esc(errMsg(e.error))}</span></div>`;
+        }).join("");
+        return `<div class="err-group"><span class="ds">${esc(labelOf(scId))}</span>${lines}` +
+          `<div class="err-why">${esc(explainError(lanes.reyden, lanes.baseline))}</div></div>`;
+      }).join("");
+  }
+  return { html, count: blocked.length + failed.length };
 }
 
 function render(snap, extrapolate = 0) {
@@ -221,6 +261,19 @@ function render(snap, extrapolate = 0) {
         bar.style.width = "100%"; bar.classList.remove("running");
         ms.textContent = "error"; ms.className = "ms err"; ms.title = st.error;
       }
+    }
+
+    // expandable per-dataset error details
+    const btn = $(`dt-${i}`), det = $(`det-${i}`);
+    if (btn && det) {
+      const { html, count } = dashIssues(d);
+      if (count) {
+        if (det.dataset.sig !== html) { det.innerHTML = html; det.dataset.sig = html; }
+        const open = state.expanded.has(d.id);
+        btn.hidden = false;
+        btn.textContent = open ? "hide details ▴" : `details (${count}) ▾`;
+        det.hidden = !open;
+      } else { btn.hidden = true; det.hidden = true; }
     }
   }
 
