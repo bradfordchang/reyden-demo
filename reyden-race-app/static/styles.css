@@ -201,15 +201,40 @@ main { max-width: 1060px; margin: 26px auto 60px; padding: 0 24px; display: grid
 }
 .err-why { color: var(--text); opacity: 0.75; }
 
-/* ---------- batch rows ---------- */
-.dash-label { display: flex; align-items: flex-start; gap: 10px; }
-.dash-label input { margin-top: 3px; accent-color: var(--rey); cursor: pointer; }
-.dash-label input:disabled { cursor: not-allowed; }
+/* ---------- dashboard picker ---------- */
+.picker-card { padding: 14px 16px; display: grid; gap: 10px; }
+.picker-head { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+#dash-filter {
+  flex: 1; min-width: 220px; background: rgba(0,0,0,0.35);
+  border: 1px solid var(--panel-border); color: var(--text);
+  border-radius: 10px; padding: 9px 12px; font: inherit; font-size: 0.85rem;
+}
+#dash-filter::placeholder { color: var(--muted); }
+.picker-count { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
+.picker-list { max-height: 330px; overflow-y: auto; display: grid; gap: 2px; }
+.pick-row {
+  display: flex; gap: 10px; align-items: center; padding: 7px 10px;
+  border-radius: 8px; cursor: pointer; font-size: 0.86rem;
+}
+.pick-row:hover { background: rgba(255,255,255,0.04); }
+.pick-row input { accent-color: var(--rey); cursor: pointer; flex: none; }
+.pick-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-date { color: var(--muted); font-size: 0.7rem; flex: none; }
+.pick-empty { color: var(--muted); font-size: 0.82rem; padding: 12px; text-align: center; }
 .sel-all {
-  display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.82rem; cursor: pointer;
+  display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 0.82rem;
+  cursor: pointer; white-space: nowrap;
 }
 .sel-all input { accent-color: var(--rey); cursor: pointer; }
-.row.off { opacity: 0.4; }
+
+.ghost {
+  background: none; color: var(--muted); border: 1px solid var(--panel-border);
+  font: inherit; font-weight: 700; font-size: 0.9rem;
+  padding: 12px 22px; border-radius: 12px; cursor: pointer;
+  transition: color 0.12s, border-color 0.12s;
+}
+.ghost:hover:not(:disabled) { color: var(--text); border-color: rgba(255,255,255,0.25); }
+.ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .chip {
   display: inline-block; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;

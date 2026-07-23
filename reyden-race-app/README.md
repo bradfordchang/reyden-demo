@@ -2,11 +2,15 @@
 
 Databricks App with two modes behind a shared nav:
 
-- **Batch Profiler** (`/`) — batch-profiles **every AI/BI dashboard the
-  signed-in user has permission to run**: each dashboard's dataset queries
-  race live on two SQL warehouses — a Reyden warehouse you pick vs the
-  warehouse the dashboard is configured to run on — one dashboard at a time,
-  with an aggregate scoreboard across the whole batch.
+- **Batch Profiler** (`/`) — batch-profiles **the AI/BI dashboards the
+  signed-in user has permission to run** (a filterable picker chooses the
+  batch; everything is pre-selected when it fits the 25-dashboard cap): each
+  dashboard's dataset queries race live on two SQL warehouses — a Reyden
+  warehouse you pick vs the warehouse the dashboard is configured to run on —
+  one dashboard at a time. The results view shows only the picked dashboards;
+  verdicts, KPIs, and the banner all compare **median end-to-end dashboard
+  load time** (per-dataset ratios include queueing on saturated warehouses,
+  so they're reported separately as "dataset wins").
 - **Single Race** (`/race`) — the original mode: pick one dashboard and race
   its dataset queries head-to-head on the two warehouses, live.
 

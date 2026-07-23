@@ -20,8 +20,8 @@
   <div class="badge">DATABRICKS APP · BATCH PROFILER</div>
   <h1>The <span class="rey">Reyden</span> Batch Profiler</h1>
   <p class="sub">
-    Profiles every AI/BI dashboard you have permission to run. Warehouse access and Unity Catalog
-    data permissions are validated up front — no dataset query runs until its dashboard passes —
+    Pick the AI/BI dashboards you want profiled. Warehouse access and Unity Catalog data
+    permissions are validated up front — no dataset query runs until its dashboard passes —
     then each dashboard's queries race a Reyden warehouse vs the dashboard's own, cache-busted, live.
   </p>
 </header>
@@ -46,7 +46,6 @@
       </div>
     </div>
     <div class="control-row">
-      <label class="sel-all"><input type="checkbox" id="sel-all" checked> all dashboards</label>
       <div class="runs">
         <span>runs</span>
         <div class="stepper">
@@ -56,13 +55,23 @@
         </div>
       </div>
       <button class="go" id="go" disabled>▶&nbsp; Validate &amp; profile</button>
+      <button class="ghost" id="edit-sel" hidden>◀&nbsp; Edit selection</button>
     </div>
     <div class="status-line" id="status-line">Loading your dashboards and Reyden warehouses…</div>
   </section>
 
+  <section class="card picker-card" id="picker-card">
+    <div class="picker-head">
+      <input id="dash-filter" type="search" placeholder="Filter dashboards…" autocomplete="off">
+      <label class="sel-all"><input type="checkbox" id="sel-all"> select all shown</label>
+      <span class="picker-count" id="picker-count"></span>
+    </div>
+    <div class="picker-list" id="picker-list"></div>
+  </section>
+
   <section class="kpis" id="kpis" hidden>
-    <div class="kpi hero-kpi"><div class="kpi-val" id="k-speedup">–</div><div class="kpi-label">geomean speedup</div></div>
-    <div class="kpi"><div class="kpi-val" id="k-wins">–</div><div class="kpi-label">Reyden wins</div></div>
+    <div class="kpi hero-kpi"><div class="kpi-val" id="k-speedup">–</div><div class="kpi-label">load speedup (geomean)</div></div>
+    <div class="kpi"><div class="kpi-val" id="k-wins">–</div><div class="kpi-label">dataset wins</div></div>
     <div class="kpi totals">
       <div class="kpi-label">total engine time</div>
       <div class="total-row"><span class="tag rey">REY</span><div class="total-bar"><i id="t-rey"></i></div><span class="tval" id="tv-rey">–</span></div>
@@ -84,9 +93,11 @@
     scenario SQL is pulled live from each dashboard's Lakeview datasets (default parameters
     applied), every statement carries a unique tag to defeat result caches, and each run fires all
     of a dashboard's queries concurrently — the same burst a real dashboard load sends — through
-    the SQL Statement Execution API on your identity (on-behalf-of authorization). Bars show median
-    dashboard load time per warehouse; both lanes warm up before each start gun so cold starts
-    never skew a lap.
+    the SQL Statement Execution API on your identity (on-behalf-of authorization). Bars, verdicts,
+    and the headline speedup all compare <em>median dashboard load time</em> — the end-to-end
+    wall-clock of that concurrent burst per warehouse. Per-dataset wins are counted separately
+    (individual query times include queueing, so their ratios can run far above the load ratio on
+    a saturated warehouse). Both lanes warm up before each start gun so cold starts never skew a lap.
   </footer>
 </main>
 

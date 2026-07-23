@@ -410,10 +410,18 @@ def _summarize(dash: dict) -> dict:
                    if dash["lanes"][lane]["run_wall_ms"] else None) for lane in LANES}
     wins = sum(1 for e in per_scenario if e.get("speedup", 0) > 1)
     return {
+        # Two different statistics, deliberately kept apart: `load_speedup`
+        # compares end-to-end dashboard load walls (what the UI verdicts show,
+        # since it matches the seconds next to them), while `geomean_speedup`
+        # aggregates per-dataset ratios — those include queueing, so on a
+        # saturated warehouse they can far exceed the load ratio.
+        "load_speedup": (round(load["baseline"] / load["reyden"], 2)
+                         if load["reyden"] and load["baseline"] else None),
         "geomean_speedup": round(statistics.geometric_mean(ratios), 2) if ratios else None,
         "min_speedup": round(min(ratios), 2) if ratios else None,
         "max_speedup": round(max(ratios), 2) if ratios else None,
         "reyden_wins": wins,
+        "pair_count": len(ratios),
         "scenario_count": len(per_scenario),
         "total_ms": totals,
         "load_ms": load,
@@ -437,10 +445,14 @@ def _overall(profile: dict) -> dict:
         for lane in LANES:
             totals[lane] = round(totals[lane] + s["total_ms"][lane], 1)
         per_dashboard.append({"id": dash["id"], "name": dash["name"],
-                              "speedup": s["geomean_speedup"]})
-    ranked = sorted((d for d in per_dashboard if d["speedup"]),
-                    key=lambda d: d["speedup"], reverse=True)
+                              "speedup": s["geomean_speedup"],
+                              "load_speedup": s.get("load_speedup")})
+    load_ratios = [d["load_speedup"] for d in per_dashboard if d["load_speedup"]]
+    ranked = sorted((d for d in per_dashboard if d["load_speedup"]),
+                    key=lambda d: d["load_speedup"], reverse=True)
     return {
+        "load_geomean_speedup": (round(statistics.geometric_mean(load_ratios), 2)
+                                 if load_ratios else None),
         "geomean_speedup": round(statistics.geometric_mean(ratios), 2) if ratios else None,
         "dashboards_profiled": sum(1 for d in profile["dashboards"] if d["status"] == "done"),
         "dashboards_skipped": sum(1 for d in profile["dashboards"] if d["status"] == "skipped"),
