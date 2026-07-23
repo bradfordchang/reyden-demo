@@ -48,7 +48,27 @@ nothing to race.
   every 600ms and extrapolates in-flight timers client-side. Per-dashboard
   rows show validation status, live lane bars (median dashboard load time on
   a shared batch-wide scale), and per-dashboard speedups; KPIs aggregate the
-  whole batch.
+  whole batch. Each row expands to a details panel: any validation-blocked or
+  failed-at-runtime datasets (SQL error class + a plain-English explanation,
+  e.g. `DIVIDE_BY_ZERO` under one engine's stricter ANSI semantics) plus a
+  per-dataset medians table. A run only counts toward a lane's load time when
+  every one of its queries succeeded, so a failed query never flatters the
+  headline, and a dashboard whose every query fails is reported as an error
+  rather than a green verdict.
+- **Interaction**: a running batch can be stopped after the current dashboard
+  (`POST /api/profile/{id}/stop`); the remaining dashboards are skipped and the
+  partial results still render. Reloading mid-run reattaches to the live job
+  (`/api/profile/active`, `/api/race/active`) instead of stranding it behind
+  the one-at-a-time slot. The dashboard selection, Reyden warehouse, and run
+  count persist in `localStorage` across reloads, and the picker paints
+  instantly from the last visit's cached list. The Single Race page mirrors
+  all of this and adds a per-dataset checklist so you can exclude a known-bad
+  dataset from a race.
+- **Dashboard parameters**: default parameter values are substituted into each
+  dataset query at load time, including DATE/DATETIME *range* parameters
+  (`:kw.min`/`:kw.max`) and date-math defaults (`now-90d/d`, `now-1h/h`, …),
+  which resolve to concrete literals so parameterized datasets validate and
+  race instead of failing on an unsubstituted token.
 
 ## Configuration
 
@@ -58,8 +78,14 @@ the signed-in user — `app.yaml` is just the uvicorn command.
 ## Local dev
 
 ```bash
-DATABRICKS_CONFIG_PROFILE=<profile> uv run uvicorn app.main:app --reload --port 8321
+DATABRICKS_CONFIG_PROFILE=<profile> uv run --frozen uvicorn app.main:app --reload --port 8321
 ```
+
+Use `--frozen` so a local run never rewrites `uv.lock`: the machine's default
+uv index is a corp proxy, and an unfrozen `uv run`/`uv add`/`uv lock` bakes
+proxy URLs into the lock that remote Apps builds can't reach. If the lock ever
+picks up `pypi-proxy` hosts (`grep -c pypi-proxy uv.lock` should be `0`),
+revert it with `git checkout -- uv.lock`.
 
 ## Deploy
 
